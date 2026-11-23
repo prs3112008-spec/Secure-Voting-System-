@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Security Shield Outline -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,22 L32,32 V52 C32,67.6 41.4,81.8 54,86 C66.6,81.8 76,67.6 76,52 V32 L54,22 Z M70,52 C70,64.6 62.4,76.1 54,79.7 C45.6,76.1 38,64.6 38,52 V36.2 L54,28.9 L70,36.2 V52 Z" />
+    <!-- Inner Checkmark -->
+    <path
+        android:fillColor="#059669"
+        android:pathData="M49,60 L41.5,52.5 L38.6,55.4 L49,65.8 L71.4,43.4 L68.5,40.5 Z" />
+</vector>

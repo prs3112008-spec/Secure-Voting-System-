@@ -1,0 +1,13 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Base.Theme.SecureVotingApp" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Customize light theme for Civic-FinTech design -->
+        <item name="android:statusBarColor">#F8FAFC</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="colorPrimary">@color/primary_navy</item>
+        <item name="colorSecondary">@color/admin_header</item>
+        <item name="android:windowBackground">@color/bg_slate</item>
+    </style>
+
+    <style name="Theme.SecureVotingApp" parent="Base.Theme.SecureVotingApp" />
+</resources>
