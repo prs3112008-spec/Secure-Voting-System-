@@ -11,15 +11,18 @@ import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -40,6 +43,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -47,6 +51,42 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
     private static final String TAG = "AdminDashboardActivity";
     private static final String BASE_URL = "https://secure-voting-system-9rnd.onrender.com";
+
+    private static class PollItem {
+        int pollId;
+        String title;
+        String description;
+        boolean isActive;
+        String status;
+
+        PollItem(int pollId, String title, String description, boolean isActive, String status) {
+            this.pollId = pollId;
+            this.title = title;
+            this.description = description;
+            this.isActive = isActive;
+            this.status = status;
+        }
+
+        @NonNull
+        @Override
+        public String toString() {
+            String label = "Poll #" + pollId + ": " + title;
+            if ("LIVE".equalsIgnoreCase(status) || isActive) {
+                label += " [LIVE]";
+            } else if ("CLOSED".equalsIgnoreCase(status)) {
+                label += " [CLOSED]";
+            } else if ("UPCOMING".equalsIgnoreCase(status)) {
+                label += " [UPCOMING]";
+            }
+            return label;
+        }
+    }
+
+    private final ArrayList<PollItem> pollList = new ArrayList<>();
+    private android.widget.ArrayAdapter<PollItem> pollSpinnerAdapter;
+    private Spinner adminPollSelectorSpinner;
+    private Button createPollBtn;
+    private String currentPollTitle = "Election";
 
     EditText candidateNameInput, candidatePartyInput;
     Button addCandidateButton, selectPhotoButton;
@@ -103,6 +143,53 @@ public class AdminDashboardActivity extends AppCompatActivity {
         sectionVoters = findViewById(R.id.sectionVoters);
 
         adminLogoutBtn = findViewById(R.id.adminLogoutBtn);
+
+        adminPollSelectorSpinner = findViewById(R.id.adminPollSelectorSpinner);
+        createPollBtn = findViewById(R.id.createPollBtn);
+
+        pollSpinnerAdapter = new android.widget.ArrayAdapter<PollItem>(this, android.R.layout.simple_spinner_item, pollList) {
+            @NonNull
+            @Override
+            public View getView(int position, View convertView, @NonNull ViewGroup parent) {
+                View view = super.getView(position, convertView, parent);
+                if (view instanceof TextView) {
+                    ((TextView) view).setTextColor(Color.WHITE);
+                    ((TextView) view).setTextSize(13);
+                }
+                return view;
+            }
+
+            @Override
+            public View getDropDownView(int position, View convertView, @NonNull ViewGroup parent) {
+                View view = super.getDropDownView(position, convertView, parent);
+                if (view instanceof TextView) {
+                    ((TextView) view).setTextColor(Color.parseColor("#0F172A"));
+                    ((TextView) view).setTextSize(13);
+                }
+                return view;
+            }
+        };
+        pollSpinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        if (adminPollSelectorSpinner != null) {
+            adminPollSelectorSpinner.setAdapter(pollSpinnerAdapter);
+            adminPollSelectorSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+                @Override
+                public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                    if (position >= 0 && position < pollList.size()) {
+                        PollItem selected = pollList.get(position);
+                        if (selected.pollId != currentPollId) {
+                            selectAdminPoll(selected);
+                        }
+                    }
+                }
+                @Override
+                public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+            });
+        }
+
+        if (createPollBtn != null) {
+            createPollBtn.setOnClickListener(v -> showCreatePollDialog());
+        }
 
         if (tabElectionBtn != null) tabElectionBtn.setOnClickListener(v -> showTab("election"));
         if (tabCandidatesBtn != null) tabCandidatesBtn.setOnClickListener(v -> showTab("candidates"));
@@ -174,9 +261,217 @@ public class AdminDashboardActivity extends AppCompatActivity {
         // Default tab on launch
         showTab("election");
 
+        // Fetch polls list & load initial data
+        fetchAdminPolls(0);
+
         // Load all voters & candidates when Admin Dashboard opens
         loadVoters();
+    }
+
+    private void fetchAdminPolls(int autoSelectPollId) {
+        String url = BASE_URL + "/api/polls";
+        String token = getJwtToken();
+
+        JsonArrayRequest request = new JsonArrayRequest(
+                Request.Method.GET,
+                url,
+                null,
+                response -> {
+                    try {
+                        pollList.clear();
+                        int selectedIndex = 0;
+
+                        for (int i = 0; i < response.length(); i++) {
+                            JSONObject p = response.getJSONObject(i);
+                            int pollId = p.optInt("poll_id", p.optInt("id", 1));
+                            String title = p.optString("title", p.optString("poll_title", "Poll #" + pollId));
+                            String description = p.optString("description", "");
+                            boolean isActive = p.optBoolean("is_active", true);
+                            String status = p.optString("status", isActive ? "LIVE" : "CLOSED");
+
+                            PollItem item = new PollItem(pollId, title, description, isActive, status);
+                            pollList.add(item);
+
+                            if (autoSelectPollId > 0 && pollId == autoSelectPollId) {
+                                selectedIndex = i;
+                            } else if (autoSelectPollId <= 0 && "LIVE".equalsIgnoreCase(status) && selectedIndex == 0) {
+                                selectedIndex = i;
+                            }
+                        }
+
+                        if (pollSpinnerAdapter != null) {
+                            pollSpinnerAdapter.notifyDataSetChanged();
+                        }
+
+                        if (!pollList.isEmpty()) {
+                            if (adminPollSelectorSpinner != null) {
+                                adminPollSelectorSpinner.setSelection(selectedIndex);
+                            }
+                            selectAdminPoll(pollList.get(selectedIndex));
+                        }
+                    } catch (JSONException e) {
+                        Log.e(TAG, "Error parsing admin polls response", e);
+                    }
+                },
+                error -> Log.e(TAG, "Error fetching admin polls list", error)
+        ) {
+            @Override
+            public Map<String, String> getHeaders() {
+                Map<String, String> headers = new HashMap<>();
+                if (token != null) {
+                    headers.put("Authorization", "Bearer " + token);
+                }
+                return headers;
+            }
+        };
+
+        Volley.newRequestQueue(this).add(request);
+    }
+
+    private void selectAdminPoll(PollItem poll) {
+        if (poll == null) return;
+
+        currentPollId = poll.pollId;
+        currentPollTitle = poll.title;
+
+        TextView activeStat = findViewById(R.id.activeElectionStatText);
+        if (activeStat != null) {
+            activeStat.setText("Poll #" + currentPollId);
+        }
+
+        loadCurrentSchedule();
         loadAdminCandidates();
+    }
+
+    private void showCreatePollDialog() {
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(48, 24, 48, 24);
+
+        com.google.android.material.textfield.TextInputLayout titleLayout = new com.google.android.material.textfield.TextInputLayout(this, null, com.google.android.material.R.style.Widget_MaterialComponents_TextInputLayout_OutlinedBox);
+        titleLayout.setHint("Poll Title");
+        com.google.android.material.textfield.TextInputEditText titleInput = new com.google.android.material.textfield.TextInputEditText(titleLayout.getContext());
+        titleLayout.addView(titleInput);
+
+        com.google.android.material.textfield.TextInputLayout descLayout = new com.google.android.material.textfield.TextInputLayout(this, null, com.google.android.material.R.style.Widget_MaterialComponents_TextInputLayout_OutlinedBox);
+        descLayout.setHint("Description (e.g. Student Council 2026)");
+        com.google.android.material.textfield.TextInputEditText descInput = new com.google.android.material.textfield.TextInputEditText(descLayout.getContext());
+        descLayout.addView(descInput);
+
+        com.google.android.material.button.MaterialButton startBtn = new com.google.android.material.button.MaterialButton(this);
+        startBtn.setText("Set Start Date & Time");
+        startBtn.setBackgroundColor(Color.parseColor("#475569"));
+        startBtn.setTextColor(Color.WHITE);
+        startBtn.setCornerRadius(16);
+
+        com.google.android.material.button.MaterialButton endBtn = new com.google.android.material.button.MaterialButton(this);
+        endBtn.setText("Set End Date & Time");
+        endBtn.setBackgroundColor(Color.parseColor("#475569"));
+        endBtn.setTextColor(Color.WHITE);
+        endBtn.setCornerRadius(16);
+
+        final String[] createStartIso = {""};
+        final String[] createEndIso = {""};
+
+        startBtn.setOnClickListener(v -> pickDateTimeForCreate(true, startBtn, createStartIso));
+        endBtn.setOnClickListener(v -> pickDateTimeForCreate(false, endBtn, createEndIso));
+
+        container.addView(titleLayout);
+        container.addView(descLayout);
+        container.addView(startBtn);
+        container.addView(endBtn);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Create New Election Poll")
+                .setView(container)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Create Poll", (d, which) -> {
+                    String title = titleInput.getText() != null ? titleInput.getText().toString().trim() : "";
+                    String desc = descInput.getText() != null ? descInput.getText().toString().trim() : "";
+
+                    if (title.isEmpty()) {
+                        Toast.makeText(AdminDashboardActivity.this, "Please enter a poll title", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    if (createStartIso[0].isEmpty() || createEndIso[0].isEmpty()) {
+                        Toast.makeText(AdminDashboardActivity.this, "Please select both start and end date/time", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+
+                    createPollOnServer(title, desc, createStartIso[0], createEndIso[0]);
+                })
+                .create();
+
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.WHITE));
+        }
+        dialog.show();
+
+        Button posBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+        if (posBtn != null) posBtn.setTextColor(Color.parseColor("#059669"));
+    }
+
+    private void pickDateTimeForCreate(boolean isStart, Button targetBtn, String[] targetIsoHolder) {
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        new android.app.DatePickerDialog(this, (view, year, month, day) -> {
+            new android.app.TimePickerDialog(this, (tView, hour, minute) -> {
+                cal.set(year, month, day, hour, minute, 0);
+                java.text.SimpleDateFormat isoFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.US);
+                java.text.SimpleDateFormat displayFormat = new java.text.SimpleDateFormat("dd MMM yyyy, hh:mm a", java.util.Locale.US);
+
+                targetIsoHolder[0] = isoFormat.format(cal.getTime());
+                targetBtn.setText((isStart ? "Start: " : "End: ") + displayFormat.format(cal.getTime()));
+            }, cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE), false).show();
+        }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH)).show();
+    }
+
+    private void createPollOnServer(String title, String description, String startTime, String endTime) {
+        String url = BASE_URL + "/api/polls/create";
+        String token = getJwtToken();
+
+        JSONObject body = new JSONObject();
+        try {
+            body.put("title", title);
+            if (!description.isEmpty()) body.put("description", description);
+            if (!startTime.isEmpty()) body.put("start_time", startTime);
+            if (!endTime.isEmpty()) body.put("end_time", endTime);
+        } catch (JSONException e) {
+            Log.e(TAG, "Error building create poll JSON", e);
+        }
+
+        JsonObjectRequest req = new JsonObjectRequest(Request.Method.POST, url, body,
+                response -> {
+                    Toast.makeText(this, response.optString("message", "Poll created successfully!"), Toast.LENGTH_SHORT).show();
+                    JSONObject pollObj = response.optJSONObject("poll");
+                    int createdPollId = pollObj != null
+                            ? pollObj.optInt("poll_id", pollObj.optInt("id", -1))
+                            : response.optInt("poll_id", response.optInt("id", -1));
+                    fetchAdminPolls(createdPollId);
+                },
+                error -> {
+                    String errMessage = "Failed to create poll. Please try again.";
+                    if (error.networkResponse != null && error.networkResponse.data != null) {
+                        try {
+                            String errBody = new String(error.networkResponse.data, "UTF-8");
+                            JSONObject obj = new JSONObject(errBody);
+                            errMessage = obj.optString("error", obj.optString("message", errMessage));
+                        } catch (Exception ignored) {}
+                    }
+                    Toast.makeText(this, errMessage, Toast.LENGTH_LONG).show();
+                }
+        ) {
+            @Override
+            public Map<String, String> getHeaders() {
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Content-Type", "application/json; charset=utf-8");
+                if (token != null) {
+                    headers.put("Authorization", "Bearer " + token);
+                }
+                return headers;
+            }
+        };
+
+        Volley.newRequestQueue(this).add(req);
     }
 
     private void showTab(String tab) {
@@ -504,7 +799,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
     }
 
     private void loadCurrentSchedule() {
-        String url = BASE_URL + "/api/votes/election-status/1";
+        String url = BASE_URL + "/api/votes/election-status/" + currentPollId;
         String token = getJwtToken();
 
         JsonObjectRequest req = new JsonObjectRequest(Request.Method.GET, url, null,
@@ -561,7 +856,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
         try {
             JSONObject body = new JSONObject();
-            body.put("poll_id", 1);
+            body.put("poll_id", currentPollId);
             body.put("start_time", selectedStartIso);
             body.put("end_time", selectedEndIso);
             if (electionActiveSwitch != null) {
@@ -648,7 +943,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
     }
 
     private void loadAdminCandidates() {
-        String url = BASE_URL + "/api/candidates/1";
+        String url = BASE_URL + "/api/candidates/" + currentPollId;
         LinearLayout candidatesContainer = findViewById(R.id.candidatesContainer);
         if (candidatesContainer == null) return;
 
@@ -867,7 +1162,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
             exportBtn.setText("EXPORTING REPORT...");
         }
 
-        String url = BASE_URL + "/api/admin/export-results/1";
+        String url = BASE_URL + "/api/admin/export-results/" + currentPollId;
         String token = getJwtToken();
 
         StringRequest request = new StringRequest(
@@ -884,7 +1179,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
                             reportsDir.mkdirs();
                         }
 
-                        java.io.File reportFile = new java.io.File(reportsDir, "election-report-poll-1.csv");
+                        java.io.File reportFile = new java.io.File(reportsDir, "election-report-poll-" + currentPollId + ".csv");
                         java.io.FileOutputStream fos = new java.io.FileOutputStream(reportFile);
                         fos.write(response != null ? response.getBytes("UTF-8") : new byte[0]);
                         fos.flush();
@@ -895,7 +1190,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
                         Intent shareIntent = new Intent(Intent.ACTION_SEND);
                         shareIntent.setType("text/csv");
                         shareIntent.putExtra(Intent.EXTRA_STREAM, contentUri);
-                        shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Official Election Report - Poll #1");
+                        shareIntent.putExtra(Intent.EXTRA_SUBJECT, "Official Election Report - Poll #" + currentPollId);
                         shareIntent.setClipData(android.content.ClipData.newRawUri("Official Election Report", contentUri));
                         shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
 
@@ -956,7 +1251,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
                 parseFormat.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
                 java.util.Date date = parseFormat.parse(rawTs);
                 if (date != null) {
-                    java.text.SimpleDateFormat displayFormat = new java.text.SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", java.util.Locale.getDefault());
+                    java.text.SimpleDateFormat displayFormat = new java.text.SimpleDateFormat("dd MMM yyyy, hh:mm a", java.util.Locale.getDefault());
                     displayFormat.setTimeZone(java.util.TimeZone.getDefault());
                     return displayFormat.format(date);
                 }

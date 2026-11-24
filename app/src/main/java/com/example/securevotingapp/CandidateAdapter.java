@@ -21,8 +21,8 @@ public class CandidateAdapter extends ArrayAdapter<String> {
         void onVoteClick(int position);
     }
 
-    public interface VotedCandidateProvider {
-        int getVotedCandidateId();
+    public interface HasVotedProvider {
+        boolean hasVoted();
     }
 
     public interface PollStatusProvider {
@@ -32,7 +32,7 @@ public class CandidateAdapter extends ArrayAdapter<String> {
     private final ArrayList<Integer> candidateIdList;
     private final ArrayList<String> partyList;
     private final ArrayList<String> photoUrlList;
-    private final VotedCandidateProvider votedCandidateProvider;
+    private final HasVotedProvider hasVotedProvider;
     private final PollStatusProvider pollStatusProvider;
     private final OnVoteClickListener voteClickListener;
 
@@ -41,14 +41,14 @@ public class CandidateAdapter extends ArrayAdapter<String> {
                             ArrayList<Integer> candidateIdList,
                             ArrayList<String> partyList,
                             ArrayList<String> photoUrlList,
-                            VotedCandidateProvider votedCandidateProvider,
+                            HasVotedProvider hasVotedProvider,
                             PollStatusProvider pollStatusProvider,
                             OnVoteClickListener voteClickListener) {
         super(context, 0, candidates);
         this.candidateIdList = candidateIdList;
         this.partyList = partyList;
         this.photoUrlList = photoUrlList;
-        this.votedCandidateProvider = votedCandidateProvider;
+        this.hasVotedProvider = hasVotedProvider;
         this.pollStatusProvider = pollStatusProvider;
         this.voteClickListener = voteClickListener;
     }
@@ -86,30 +86,21 @@ public class CandidateAdapter extends ArrayAdapter<String> {
 
         TextView voteButton = convertView.findViewById(R.id.voteButton);
         if (voteButton != null) {
-            int votedCandidateId = (votedCandidateProvider != null) ? votedCandidateProvider.getVotedCandidateId() : -1;
-            int currentCandidateId = (candidateIdList != null && position < candidateIdList.size()) ? candidateIdList.get(position) : -1;
+            boolean userHasVoted = (hasVotedProvider != null) && hasVotedProvider.hasVoted();
             boolean isClosed = (pollStatusProvider != null) && pollStatusProvider.isPollClosed();
 
-            if (isClosed && currentCandidateId != votedCandidateId) {
+            if (isClosed) {
                 voteButton.setEnabled(false);
                 voteButton.setText("POLLS CLOSED");
                 voteButton.setBackgroundColor(Color.parseColor("#94A3B8"));
                 voteButton.setTextColor(Color.WHITE);
-            } else if (votedCandidateId != -1) {
-                // Keep button enabled so clicking "YOUR VOTE" can open receipt dialog
+            } else if (userHasVoted) {
+                // Uniformly slate all candidate cards with "BALLOT RECORDED"
+                // (no per-candidate green highlight to preserve true ballot secrecy)
                 voteButton.setEnabled(true);
-
-                if (currentCandidateId == votedCandidateId) {
-                    // This is the person they voted for! Turn it green.
-                    voteButton.setText("YOUR VOTE");
-                    voteButton.setBackgroundColor(Color.parseColor("#059669")); // Emerald green
-                    voteButton.setTextColor(Color.WHITE);
-                } else {
-                    // Not their chosen candidate. Gray it out.
-                    voteButton.setText("TAP TO VOTE");
-                    voteButton.setBackgroundColor(Color.parseColor("#94A3B8")); // Neutral slate
-                    voteButton.setTextColor(Color.WHITE);
-                }
+                voteButton.setText("BALLOT RECORDED");
+                voteButton.setBackgroundColor(Color.parseColor("#94A3B8")); // Neutral slate
+                voteButton.setTextColor(Color.WHITE);
             } else {
                 // User hasn't voted yet. Keep buttons clickable and normal dark navy.
                 voteButton.setEnabled(true);

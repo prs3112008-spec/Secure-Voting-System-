@@ -13,6 +13,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ProgressBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
@@ -41,8 +42,7 @@ import java.util.Map;
 
 public class DashboardActivity extends AppCompatActivity {
 
-    // -1 means the user hasn't voted yet.
-    private int votedCandidateId = -1;
+    private boolean userHasVoted = false;
     private String myVoteReceipt = "";
     private int pendingCandidateId = -1;
     private String pendingVerificationToken = "";
@@ -69,13 +69,49 @@ public class DashboardActivity extends AppCompatActivity {
     private android.os.CountDownTimer countDownTimer;
     private boolean isPollsClosedOrLocked = false;
 
+    private static class PollItem {
+        int pollId;
+        String title;
+        String description;
+        boolean isActive;
+        String status;
+
+        PollItem(int pollId, String title, String description, boolean isActive, String status) {
+            this.pollId = pollId;
+            this.title = title;
+            this.description = description;
+            this.isActive = isActive;
+            this.status = status;
+        }
+
+        @NonNull
+        @Override
+        public String toString() {
+            String label = "Poll #" + pollId + ": " + title;
+            if ("LIVE".equalsIgnoreCase(status) || isActive) {
+                label += " [LIVE]";
+            } else if ("CLOSED".equalsIgnoreCase(status)) {
+                label += " [CLOSED]";
+            } else if ("UPCOMING".equalsIgnoreCase(status)) {
+                label += " [UPCOMING]";
+            }
+            return label;
+        }
+    }
+
+    private final ArrayList<PollItem> pollList = new ArrayList<>();
+    private android.widget.ArrayAdapter<PollItem> pollSpinnerAdapter;
+    private Spinner pollSelectorSpinner;
+    private TextView pollDescriptionText;
+    private String currentPollTitle = "Election";
+
     ListView candidatesListView;
     ArrayList<String> candidateList = new ArrayList<>();
     ArrayList<Integer> candidateIdList = new ArrayList<>(); // Stores the database IDs
     ArrayList<String> candidatePartyList = new ArrayList<>();
     ArrayList<String> candidatePhotoList = new ArrayList<>();
     CandidateAdapter adapter;
-    int currentPollId = 1; // Poll ID is 1
+    int currentPollId = 1; // Default Poll ID
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -92,6 +128,8 @@ public class DashboardActivity extends AppCompatActivity {
         Button goToResultsButton = findViewById(R.id.goToResultsButton);
         goToResultsButton.setOnClickListener(v -> {
             Intent intent = new Intent(DashboardActivity.this, LiveResultsActivity.class);
+            intent.putExtra("EXTRA_POLL_ID", currentPollId);
+            intent.putExtra("EXTRA_POLL_TITLE", currentPollTitle);
             startActivity(intent);
         });
 
@@ -109,6 +147,27 @@ public class DashboardActivity extends AppCompatActivity {
         });
 
         candidatesListView = findViewById(R.id.premiumListView);
+        pollSelectorSpinner = findViewById(R.id.pollSelectorSpinner);
+        pollDescriptionText = findViewById(R.id.pollDescriptionText);
+
+        pollSpinnerAdapter = new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_item, pollList);
+        pollSpinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        if (pollSelectorSpinner != null) {
+            pollSelectorSpinner.setAdapter(pollSpinnerAdapter);
+            pollSelectorSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+                @Override
+                public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                    if (position >= 0 && position < pollList.size()) {
+                        PollItem selected = pollList.get(position);
+                        if (selected.pollId != currentPollId) {
+                            selectPoll(selected);
+                        }
+                    }
+                }
+                @Override
+                public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+            });
+        }
 
         SharedPreferences sharedPreferences = SecurePrefs.get(this);
         String userRole = sharedPreferences.getString("role", "voter");
@@ -136,7 +195,7 @@ public class DashboardActivity extends AppCompatActivity {
             verifyVoteButton.setOnClickListener(v -> showVerifyVoteDialog());
         }
 
-        adapter = new CandidateAdapter(this, candidateList, candidateIdList, candidatePartyList, candidatePhotoList, () -> votedCandidateId, () -> isPollsClosedOrLocked, position -> {
+        adapter = new CandidateAdapter(this, candidateList, candidateIdList, candidatePartyList, candidatePhotoList, () -> userHasVoted, () -> isPollsClosedOrLocked, position -> {
             if (position < candidateIdList.size()) {
                 int selectedCandidateId = candidateIdList.get(position);
                 onCandidateClick(selectedCandidateId);
@@ -151,6 +210,107 @@ public class DashboardActivity extends AppCompatActivity {
                 onCandidateClick(selectedCandidateId);
             }
         });
+
+        fetchPolls();
+    }
+
+    private void fetchPolls() {
+        String url = "https://secure-voting-system-9rnd.onrender.com/api/polls";
+
+        SharedPreferences sharedPreferences = SecurePrefs.get(this);
+        String token = sharedPreferences.getString("jwt_token", null);
+
+        if (token == null) return;
+
+        JsonArrayRequest request = new JsonArrayRequest(
+                Request.Method.GET,
+                url,
+                null,
+                response -> {
+                    try {
+                        pollList.clear();
+                        int selectedIndex = 0;
+
+                        for (int i = 0; i < response.length(); i++) {
+                            JSONObject p = response.getJSONObject(i);
+                            int pollId = p.optInt("poll_id", p.optInt("id", 1));
+                            String title = p.optString("title", p.optString("poll_title", "Poll #" + pollId));
+                            String description = p.optString("description", "");
+                            boolean isActive = p.optBoolean("is_active", true);
+                            String status = p.optString("status", isActive ? "LIVE" : "CLOSED");
+
+                            PollItem item = new PollItem(pollId, title, description, isActive, status);
+                            pollList.add(item);
+
+                            if ("LIVE".equalsIgnoreCase(status) && selectedIndex == 0) {
+                                selectedIndex = i;
+                            }
+                        }
+
+                        if (pollSpinnerAdapter != null) {
+                            pollSpinnerAdapter.notifyDataSetChanged();
+                        }
+
+                        if (!pollList.isEmpty()) {
+                            if (pollSelectorSpinner != null) {
+                                pollSelectorSpinner.setSelection(selectedIndex);
+                            }
+                            selectPoll(pollList.get(selectedIndex));
+                        }
+                    } catch (JSONException e) {
+                        Log.e(TAG, "Error parsing polls response", e);
+                    }
+                },
+                error -> Log.e(TAG, "Error fetching polls list", error)
+        ) {
+            @Override
+            public Map<String, String> getHeaders() {
+                Map<String, String> headers = new HashMap<>();
+                headers.put("Authorization", "Bearer " + token);
+                return headers;
+            }
+        };
+
+        request.setRetryPolicy(new DefaultRetryPolicy(
+                30000,
+                DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
+                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
+        ));
+
+        Volley.newRequestQueue(this).add(request);
+    }
+
+    private void selectPoll(PollItem poll) {
+        if (poll == null) return;
+
+        if (countDownTimer != null) {
+            countDownTimer.cancel();
+        }
+
+        currentPollId = poll.pollId;
+        currentPollTitle = poll.title;
+        userHasVoted = false;
+        myVoteReceipt = SecurePrefs.get(this).getString("vote_receipt_poll_" + currentPollId, "");
+
+        if (pollDescriptionText != null) {
+            if (poll.description != null && !poll.description.isEmpty()) {
+                pollDescriptionText.setText(poll.description);
+                pollDescriptionText.setVisibility(View.VISIBLE);
+            } else {
+                pollDescriptionText.setVisibility(View.GONE);
+            }
+        }
+
+        candidateList.clear();
+        candidateIdList.clear();
+        candidatePartyList.clear();
+        candidatePhotoList.clear();
+        if (adapter != null) {
+            adapter.notifyDataSetChanged();
+        }
+
+        SharedPreferences sharedPreferences = SecurePrefs.get(this);
+        String userRole = sharedPreferences.getString("role", "voter");
 
         if (!"admin".equalsIgnoreCase(userRole)) {
             fetchCandidates();
@@ -185,36 +345,17 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     private void onCandidateClick(int selectedCandidateId) {
-        if (votedCandidateId != -1) {
-            if (selectedCandidateId == votedCandidateId) {
-                // Show the cryptographic receipt
-                String hashToCopy = myVoteReceipt.isEmpty() ? "Verified in database" : myVoteReceipt;
-                AlertDialog dialog = new AlertDialog.Builder(DashboardActivity.this)
-                        .setTitle("Verified Vote Receipt")
-                        .setMessage("Your vote is securely recorded in the database.")
-                        .setView(createReceiptView(hashToCopy))
-                        .setNeutralButton("Copy Hash", (d, which) -> {
-                            ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                            ClipData clip = ClipData.newPlainText("Vote Receipt Hash", hashToCopy);
-                            if (clipboard != null) {
-                                clipboard.setPrimaryClip(clip);
-                            }
-                            Toast.makeText(DashboardActivity.this, "Receipt hash copied to clipboard!", Toast.LENGTH_SHORT).show();
-                        })
-                        .setPositiveButton("Close", null)
-                        .create();
+        if (userHasVoted) {
+            String receipt = myVoteReceipt;
+            if (receipt == null || receipt.isEmpty()) {
+                receipt = SecurePrefs.get(this).getString("vote_receipt_poll_" + currentPollId, "");
+            }
 
-                if (dialog.getWindow() != null) {
-                    dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.WHITE));
-                }
-                dialog.show();
-
-                Button positiveBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-                if (positiveBtn != null) positiveBtn.setTextColor(Color.parseColor("#1E3A8A"));
-                Button neutralBtn = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
-                if (neutralBtn != null) neutralBtn.setTextColor(Color.parseColor("#1E3A8A"));
+            if (!receipt.isEmpty()) {
+                myVoteReceipt = receipt;
+                showVoteReceiptDialog(receipt);
             } else {
-                Toast.makeText(DashboardActivity.this, "You already voted for someone else!", Toast.LENGTH_SHORT).show();
+                Toast.makeText(DashboardActivity.this, "Your ballot is securely recorded in the ledger.", Toast.LENGTH_SHORT).show();
             }
         } else {
             // USER HAS NOT VOTED YET: Confirm choice first
@@ -459,7 +600,7 @@ public class DashboardActivity extends AppCompatActivity {
             return;
         }
 
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/candidates/1";
+        String url = "https://secure-voting-system-9rnd.onrender.com/api/candidates/" + currentPollId;
         String token = sharedPreferences.getString("jwt_token", null);
 
         if (token == null) {
@@ -553,7 +694,7 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     private void checkElectionStatus() {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/election-status/1";
+        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/election-status/" + currentPollId;
 
         JsonObjectRequest request = new JsonObjectRequest(
                 Request.Method.GET, url, null,
@@ -699,8 +840,7 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     private void checkVoteStatus() {
-        // Your new Node.js status endpoint for poll_id 1
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/status/1";
+        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/status/" + currentPollId;
 
         SharedPreferences sharedPreferences = SecurePrefs.get(this);
         String token = sharedPreferences.getString("jwt_token", null);
@@ -710,22 +850,15 @@ public class DashboardActivity extends AppCompatActivity {
                 url,
                 null,
                 response -> {
-                    try {
-                        boolean hasVoted = response.getBoolean("hasVoted");
-                        if (hasVoted) {
-                            // Store the candidate they voted for
-                            votedCandidateId = response.getInt("candidate_id");
-                            if (response.has("receipt_hash")) {
-                                myVoteReceipt = response.getString("receipt_hash"); // Save the secure hash!
-                            }
+                    boolean hasVoted = response.optBoolean("hasVoted", false);
+                    if (hasVoted) {
+                        userHasVoted = true;
+                        myVoteReceipt = SecurePrefs.get(this).getString("vote_receipt_poll_" + currentPollId, "");
 
-                            // Refresh the list so the buttons update their colors
-                            if (adapter != null) {
-                                adapter.notifyDataSetChanged();
-                            }
+                        // Refresh the list so the buttons update their colors
+                        if (adapter != null) {
+                            adapter.notifyDataSetChanged();
                         }
-                    } catch (JSONException e) {
-                        Log.e(TAG, "Error parsing vote status response", e);
                     }
                 },
                 error -> Log.e(TAG, "Error fetching vote status")
@@ -751,7 +884,7 @@ public class DashboardActivity extends AppCompatActivity {
     private void showVoteReceiptDialog(String voteHash) {
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Vote Confirmed & Secured")
-                .setMessage("Your vote is recorded in the tamper-evident hash chain.")
+                .setMessage("Your vote is recorded in the tamper-evident hash chain.\n\nBallot Secrecy Note: Save this receipt hash—for ballot secrecy, the server does not link it to your account.")
                 .setView(createReceiptView(voteHash))
                 .setCancelable(false)
                 .setNeutralButton("Copy Hash", (d, which) -> {
@@ -786,7 +919,7 @@ public class DashboardActivity extends AppCompatActivity {
         // We package poll_id, candidate_id, and verification_token into the request
         JSONObject requestBody = new JSONObject();
         try {
-            requestBody.put("poll_id", 1);          // Poll ID
+            requestBody.put("poll_id", currentPollId);          // Current Selected Poll ID
             requestBody.put("candidate_id", candidateId); // The candidate you tapped
             if (pendingVerificationToken != null && !pendingVerificationToken.isEmpty()) {
                 requestBody.put("verification_token", pendingVerificationToken);
@@ -801,15 +934,19 @@ public class DashboardActivity extends AppCompatActivity {
                 requestBody,
                 response -> {
                     pendingVerificationToken = "";
-                    votedCandidateId = candidateId;
-                    String voteHash = response.optString("current_hash", response.optString("receipt_hash", "Hash unavailable"));
-                    myVoteReceipt = voteHash;
-                    showVoteReceiptDialog(voteHash);
+                    userHasVoted = true;
+                    String receipt = response.optString("current_hash", response.optString("hash", response.optString("receipt_hash", "")));
+                    if (!receipt.isEmpty()) {
+                        myVoteReceipt = receipt;
+                        SecurePrefs.get(this).edit().putString("vote_receipt_poll_" + currentPollId, receipt).apply();
+                        showVoteReceiptDialog(receipt);
+                    } else {
+                        Toast.makeText(DashboardActivity.this, "Vote cast successfully!", Toast.LENGTH_LONG).show();
+                    }
                     checkVoteStatus();
                     if (adapter != null) {
                         adapter.notifyDataSetChanged();
                     }
-                    Toast.makeText(DashboardActivity.this, "Vote cast successfully!", Toast.LENGTH_LONG).show();
                 },
                 error -> {
                     pendingVerificationToken = "";
@@ -879,11 +1016,21 @@ public class DashboardActivity extends AppCompatActivity {
                 jsonBody,
                 response -> {
                     pendingVerificationToken = "";
-                    try {
-                        String msg = response.getString("message");
-                        Toast.makeText(DashboardActivity.this, msg, Toast.LENGTH_LONG).show();
-                    } catch (JSONException e) {
-                        Log.e(TAG, "Error parsing vote response", e);
+                    userHasVoted = true;
+                    String receipt = response.optString("current_hash", response.optString("hash", response.optString("receipt_hash", "")));
+                    if (!receipt.isEmpty()) {
+                        myVoteReceipt = receipt;
+                        SecurePrefs.get(this).edit().putString("vote_receipt_poll_" + pollId, receipt).apply();
+                        showVoteReceiptDialog(receipt);
+                    } else {
+                        try {
+                            String msg = response.optString("message", "Vote cast successfully!");
+                            Toast.makeText(DashboardActivity.this, msg, Toast.LENGTH_LONG).show();
+                        } catch (Exception ignored) {}
+                    }
+                    checkVoteStatus();
+                    if (adapter != null) {
+                        adapter.notifyDataSetChanged();
                     }
                 },
                 error -> {

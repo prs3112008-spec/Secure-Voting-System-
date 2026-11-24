@@ -54,11 +54,23 @@ public class LiveResultsActivity extends AppCompatActivity {
     private int turnoutVotesCast = -1;
     private int turnoutApprovedVoters = -1;
     private double turnoutPercentage = -1.0;
+    private int pollId = 1;
+    private String pollTitle = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         super.setContentView(R.layout.activity_live_results);
+
+        pollId = getIntent().getIntExtra("EXTRA_POLL_ID", 1);
+        pollTitle = getIntent().getStringExtra("EXTRA_POLL_TITLE");
+
+        if (pollTitle != null && !pollTitle.isEmpty()) {
+            TextView titleView = findViewById(R.id.liveResultsTitle);
+            if (titleView != null) {
+                titleView.setText("Poll #" + pollId + ": " + pollTitle);
+            }
+        }
 
         requestQueue = Volley.newRequestQueue(this);
         resultsListView = findViewById(R.id.resultsListView);
@@ -73,7 +85,7 @@ public class LiveResultsActivity extends AppCompatActivity {
     }
 
     private void fetchElectionStatus() {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/election-status/1";
+        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/election-status/" + pollId;
 
         JsonObjectRequest request = new JsonObjectRequest(
                 Request.Method.GET,
@@ -103,7 +115,7 @@ public class LiveResultsActivity extends AppCompatActivity {
             resultsProgressBar.setVisibility(View.VISIBLE);
         }
 
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/polls/1/results";
+        String url = "https://secure-voting-system-9rnd.onrender.com/api/polls/" + pollId + "/results";
 
         SharedPreferences sharedPreferences = SecurePrefs.get(this);
         String token = sharedPreferences.getString("jwt_token", null);
@@ -177,7 +189,7 @@ public class LiveResultsActivity extends AppCompatActivity {
     }
 
     private void fetchCandidatesFallback(String token) {
-        String fallbackUrl = "https://secure-voting-system-9rnd.onrender.com/api/candidates/1";
+        String fallbackUrl = "https://secure-voting-system-9rnd.onrender.com/api/candidates/" + pollId;
 
         com.android.volley.toolbox.StringRequest stringRequest = new com.android.volley.toolbox.StringRequest(
                 Request.Method.GET,
