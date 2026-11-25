@@ -26,11 +26,14 @@ import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import com.android.volley.DefaultRetryPolicy;
-import com.android.volley.Request;
-import com.android.volley.RequestQueue;
-import com.android.volley.toolbox.JsonObjectRequest;
-import com.android.volley.toolbox.Volley;
+import com.example.securevotingapp.network.ApiClient;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
+
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.face.Face;
@@ -59,7 +62,6 @@ public class LivenessActivity extends AppCompatActivity {
     private ExecutorService cameraExecutor;
     private FaceDetector faceDetector;
     private FaceRecognizer faceRecognizer;
-    private RequestQueue requestQueue;
 
     private String jwtToken;
     private String enrollToken;
@@ -77,7 +79,6 @@ public class LivenessActivity extends AppCompatActivity {
         previewView = findViewById(R.id.previewView);
         statusText = findViewById(R.id.statusText);
         cameraExecutor = Executors.newSingleThreadExecutor();
-        requestQueue = Volley.newRequestQueue(this);
 
         SharedPreferences prefs = SecurePrefs.get(this);
         jwtToken = prefs.getString("jwt_token", null);
@@ -105,6 +106,8 @@ public class LivenessActivity extends AppCompatActivity {
 
         if ("ENROLL".equalsIgnoreCase(activityMode)) {
             statusText.setText("Face Enrollment: Look at camera & BLINK");
+        } else if ("RESET".equalsIgnoreCase(activityMode) || "CAPTURE".equalsIgnoreCase(activityMode)) {
+            statusText.setText("Look at camera & BLINK to verify face for reset");
         } else {
             statusText.setText("Look at camera & BLINK to verify identity");
         }
@@ -190,6 +193,11 @@ public class LivenessActivity extends AppCompatActivity {
 
                                 if ("ENROLL".equalsIgnoreCase(activityMode)) {
                                     registerFaceEmbedding(liveEmbedding);
+                                } else if ("RESET".equalsIgnoreCase(activityMode) || "CAPTURE".equalsIgnoreCase(activityMode)) {
+                                    Intent resultIntent = new Intent();
+                                    resultIntent.putExtra("face_embedding", liveEmbedding);
+                                    setResult(RESULT_OK, resultIntent);
+                                    finish();
                                 } else {
                                     verifyFaceEmbeddingServer(liveEmbedding);
                                 }
@@ -214,60 +222,40 @@ public class LivenessActivity extends AppCompatActivity {
             return;
         }
 
-        final String tokenHeader = activeToken;
-        String url = BASE_URL + "/api/auth/register-face";
-        JSONObject body = new JSONObject();
-        JSONArray arr = new JSONArray();
-        try {
-            for (float v : embedding) {
-                arr.put(v);
-            }
-            body.put("face_embedding", arr);
-        } catch (JSONException e) {
-            Log.e("LivenessActivity", "Error building register-face JSON payload", e);
+        JsonObject body = new JsonObject();
+        JsonArray arr = new JsonArray();
+        for (float v : embedding) {
+            arr.add(v);
         }
+        body.add("face_embedding", arr);
 
-        JsonObjectRequest request = new JsonObjectRequest(Request.Method.POST, url, body,
-                response -> {
+        ApiClient.getApiService(this).registerFace(body).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful()) {
                     SecurePrefs.clear(LivenessActivity.this);
 
-                    Toast.makeText(this, "Registration & face enrollment complete! Please wait for Admin approval before logging in.", Toast.LENGTH_LONG).show();
+                    Toast.makeText(LivenessActivity.this, "Registration & face enrollment complete! Please wait for Admin approval before logging in.", Toast.LENGTH_LONG).show();
 
                     Intent intent = new Intent(LivenessActivity.this, MainActivity.class);
                     intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
                     startActivity(intent);
                     finish();
-                },
-                error -> {
-                    String errMessage = "Failed to save face profile";
-                    if (error.networkResponse != null && error.networkResponse.data != null) {
-                        try {
-                            String errBody = new String(error.networkResponse.data, "UTF-8");
-                            JSONObject obj = new JSONObject(errBody);
-                            errMessage = obj.optString("error", obj.optString("message", errMessage));
-                        } catch (Exception ignored) {}
-                    }
-                    Toast.makeText(this, errMessage, Toast.LENGTH_LONG).show();
+                } else {
+                    String errMessage = ApiClient.parseErrorMessage(response, "Failed to save face profile");
+                    Toast.makeText(LivenessActivity.this, errMessage, Toast.LENGTH_LONG).show();
                     setResult(RESULT_CANCELED);
                     finish();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Authorization", "Bearer " + tokenHeader);
-                headers.put("Content-Type", "application/json");
-                return headers;
             }
-        };
 
-        request.setRetryPolicy(new DefaultRetryPolicy(
-                60000,
-                0,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        requestQueue.add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Toast.makeText(LivenessActivity.this, "Failed to save face profile. Check connection.", Toast.LENGTH_LONG).show();
+                setResult(RESULT_CANCELED);
+                finish();
+            }
+        });
     }
 
     private void verifyFaceEmbeddingServer(float[] embedding) {
@@ -283,58 +271,43 @@ public class LivenessActivity extends AppCompatActivity {
             return;
         }
 
-        String url = BASE_URL + "/api/auth/verify-face";
-        JSONObject body = new JSONObject();
-        JSONArray arr = new JSONArray();
-        try {
-            for (float v : embedding) {
-                arr.put(v);
-            }
-            body.put("face_embedding", arr);
-        } catch (JSONException e) {
-            Log.e("LivenessActivity", "Error building verify-face JSON payload", e);
+        JsonObject body = new JsonObject();
+        JsonArray arr = new JsonArray();
+        for (float v : embedding) {
+            arr.add(v);
         }
+        body.add("face_embedding", arr);
 
-        JsonObjectRequest request = new JsonObjectRequest(Request.Method.POST, url, body,
-                response -> {
-                    String verificationToken = response.optString("verification_token", response.optString("token", ""));
-                    Toast.makeText(this, "Face & Liveness Verified!", Toast.LENGTH_SHORT).show();
+        ApiClient.getApiService(this).verifyFace(body).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
+                    String verificationToken = respObj.has("verification_token")
+                            ? respObj.get("verification_token").getAsString()
+                            : (respObj.has("token") ? respObj.get("token").getAsString() : "");
+
+                    Toast.makeText(LivenessActivity.this, "Face & Liveness Verified!", Toast.LENGTH_SHORT).show();
 
                     Intent resultIntent = new Intent();
                     resultIntent.putExtra("verification_token", verificationToken);
                     setResult(RESULT_OK, resultIntent);
                     finish();
-                },
-                error -> {
-                    String errMessage = "Face verification failed. Please try again.";
-                    if (error.networkResponse != null && error.networkResponse.data != null) {
-                        try {
-                            String errBody = new String(error.networkResponse.data, "UTF-8");
-                            JSONObject obj = new JSONObject(errBody);
-                            errMessage = obj.optString("error", obj.optString("message", errMessage));
-                        } catch (Exception ignored) {}
-                    }
-                    Toast.makeText(this, errMessage, Toast.LENGTH_LONG).show();
+                } else {
+                    String errMessage = ApiClient.parseErrorMessage(response, "Face verification failed. Please try again.");
+                    Toast.makeText(LivenessActivity.this, errMessage, Toast.LENGTH_LONG).show();
                     setResult(RESULT_CANCELED);
                     finish();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Authorization", "Bearer " + jwtToken);
-                headers.put("Content-Type", "application/json");
-                return headers;
             }
-        };
 
-        request.setRetryPolicy(new DefaultRetryPolicy(
-                30000,
-                0,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        requestQueue.add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Toast.makeText(LivenessActivity.this, "Face verification failed. Check connection.", Toast.LENGTH_LONG).show();
+                setResult(RESULT_CANCELED);
+                finish();
+            }
+        });
     }
 
     private Bitmap rotateBitmap(Bitmap bitmap, int rotationDegrees) {

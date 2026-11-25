@@ -15,14 +15,11 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.android.volley.Request;
-import com.android.volley.RequestQueue;
-import com.android.volley.toolbox.JsonArrayRequest;
-import com.android.volley.toolbox.JsonObjectRequest;
-import com.android.volley.toolbox.Volley;
 import com.bumptech.glide.Glide;
+import com.example.securevotingapp.network.ApiClient;
 import com.github.mikephil.charting.charts.BarChart;
 import com.github.mikephil.charting.components.XAxis;
 import com.github.mikephil.charting.data.BarData;
@@ -30,25 +27,25 @@ import com.github.mikephil.charting.data.BarDataSet;
 import com.github.mikephil.charting.data.BarEntry;
 import com.github.mikephil.charting.formatter.IndexAxisValueFormatter;
 import com.github.mikephil.charting.formatter.ValueFormatter;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 
-import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
 
 public class LiveResultsActivity extends AppCompatActivity {
 
     private static final String TAG = "LiveResultsActivity";
 
-    ListView resultsListView;
     ProgressBar resultsProgressBar;
     List<JSONObject> resultsList = new ArrayList<>();
-    ResultsAdapter adapter;
-    private RequestQueue requestQueue;
     private String electionStatus = "LIVE";
 
     private int turnoutVotesCast = -1;
@@ -57,10 +54,20 @@ public class LiveResultsActivity extends AppCompatActivity {
     private int pollId = 1;
     private String pollTitle = "";
 
+    private androidx.swiperefreshlayout.widget.SwipeRefreshLayout resultsSwipeRefresh;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         super.setContentView(R.layout.activity_live_results);
+
+        resultsSwipeRefresh = findViewById(R.id.resultsSwipeRefresh);
+        if (resultsSwipeRefresh != null) {
+            resultsSwipeRefresh.setOnRefreshListener(() -> {
+                fetchElectionStatus();
+                fetchLiveResults();
+            });
+        }
 
         pollId = getIntent().getIntExtra("EXTRA_POLL_ID", 1);
         pollTitle = getIntent().getStringExtra("EXTRA_POLL_TITLE");
@@ -72,42 +79,28 @@ public class LiveResultsActivity extends AppCompatActivity {
             }
         }
 
-        requestQueue = Volley.newRequestQueue(this);
-        resultsListView = findViewById(R.id.resultsListView);
         resultsProgressBar = findViewById(R.id.resultsProgressBar);
-        adapter = new ResultsAdapter();
-        if (resultsListView != null) {
-            resultsListView.setAdapter(adapter);
-        }
 
         fetchElectionStatus();
         fetchLiveResults();
     }
 
     private void fetchElectionStatus() {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/election-status/" + pollId;
-
-        JsonObjectRequest request = new JsonObjectRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
-                    electionStatus = response.optString("status", "LIVE");
-                    if (adapter != null) {
-                        adapter.notifyDataSetChanged();
-                    }
+        ApiClient.getApiService(this).getElectionStatus(pollId).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject obj = response.body();
+                    electionStatus = obj.has("status") ? obj.get("status").getAsString() : "LIVE";
                     renderResults();
-                },
-                error -> Log.e(TAG, "Error fetching election status")
-        );
+                }
+            }
 
-        request.setRetryPolicy(new com.android.volley.DefaultRetryPolicy(
-                30000,
-                com.android.volley.DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                com.android.volley.DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        requestQueue.add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Log.e(TAG, "Error fetching election status", t);
+            }
+        });
     }
 
     private void fetchLiveResults() {
@@ -115,149 +108,96 @@ public class LiveResultsActivity extends AppCompatActivity {
             resultsProgressBar.setVisibility(View.VISIBLE);
         }
 
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/polls/" + pollId + "/results";
-
-        SharedPreferences sharedPreferences = SecurePrefs.get(this);
-        String token = sharedPreferences.getString("jwt_token", null);
-
-        com.android.volley.toolbox.StringRequest stringRequest = new com.android.volley.toolbox.StringRequest(
-                Request.Method.GET,
-                url,
-                response -> {
-                    if (resultsProgressBar != null) {
-                        resultsProgressBar.setVisibility(View.GONE);
-                    }
+        ApiClient.getApiService(this).getPollResults(pollId).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (resultsProgressBar != null) {
+                    resultsProgressBar.setVisibility(View.GONE);
+                }
+                if (resultsSwipeRefresh != null) {
+                    resultsSwipeRefresh.setRefreshing(false);
+                }
+                if (response.isSuccessful() && response.body() != null) {
                     try {
                         resultsList.clear();
-                        String trimmed = response != null ? response.trim() : "";
-                        JSONArray array = null;
+                        JsonObject obj = response.body();
 
-                        if (trimmed.startsWith("[")) {
-                            array = new JSONArray(trimmed);
-                        } else if (trimmed.startsWith("{")) {
-                            JSONObject obj = new JSONObject(trimmed);
-                            if (obj.has("turnout")) {
-                                JSONObject turnout = obj.optJSONObject("turnout");
-                                if (turnout != null) {
-                                    turnoutVotesCast = turnout.optInt("total_votes_cast", 0);
-                                    turnoutApprovedVoters = turnout.optInt("approved_voters", 0);
-                                    turnoutPercentage = turnout.optDouble("turnout_percentage", 0.0);
-                                    Log.d(TAG, "Parsed turnout: " + turnoutVotesCast + " of " + turnoutApprovedVoters + " (" + turnoutPercentage + "%)");
-                                }
-                            }
-                            array = obj.optJSONArray("candidates");
-                            if (array == null) array = obj.optJSONArray("results");
-                            if (array == null) array = obj.optJSONArray("data");
+                        if (obj.has("turnout") && obj.get("turnout").isJsonObject()) {
+                            JsonObject turnout = obj.getAsJsonObject("turnout");
+                            turnoutVotesCast = turnout.has("total_votes_cast") ? turnout.get("total_votes_cast").getAsInt() : 0;
+                            turnoutApprovedVoters = turnout.has("approved_voters") ? turnout.get("approved_voters").getAsInt() : 0;
+                            turnoutPercentage = turnout.has("turnout_percentage") ? turnout.get("turnout_percentage").getAsDouble() : 0.0;
+                        }
+
+                        JsonArray array = null;
+                        if (obj.has("candidates") && obj.get("candidates").isJsonArray()) {
+                            array = obj.getAsJsonArray("candidates");
+                        } else if (obj.has("results") && obj.get("results").isJsonArray()) {
+                            array = obj.getAsJsonArray("results");
+                        } else if (obj.has("data") && obj.get("data").isJsonArray()) {
+                            array = obj.getAsJsonArray("data");
                         }
 
                         if (array != null) {
-                            for (int i = 0; i < array.length(); i++) {
-                                resultsList.add(array.getJSONObject(i));
+                            for (int i = 0; i < array.size(); i++) {
+                                if (array.get(i).isJsonObject()) {
+                                    resultsList.add(new JSONObject(array.get(i).getAsJsonObject().toString()));
+                                }
                             }
                         }
 
-                        if (adapter != null) {
-                            adapter.notifyDataSetChanged();
-                        }
                         renderResults();
-                    } catch (JSONException e) {
+                    } catch (Exception e) {
                         Log.e(TAG, "Error parsing live results response", e);
                     }
-                },
-                error -> {
-                    // Fallback to candidates endpoint if polls results endpoint fails
-                    fetchCandidatesFallback(token);
+                } else {
+                    fetchCandidatesFallback();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
             }
-        };
 
-        stringRequest.setRetryPolicy(new com.android.volley.DefaultRetryPolicy(
-                30000,
-                com.android.volley.DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                com.android.volley.DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        requestQueue.add(stringRequest);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                fetchCandidatesFallback();
+            }
+        });
     }
 
-    private void fetchCandidatesFallback(String token) {
-        String fallbackUrl = "https://secure-voting-system-9rnd.onrender.com/api/candidates/" + pollId;
-
-        com.android.volley.toolbox.StringRequest stringRequest = new com.android.volley.toolbox.StringRequest(
-                Request.Method.GET,
-                fallbackUrl,
-                response -> {
-                    if (resultsProgressBar != null) {
-                        resultsProgressBar.setVisibility(View.GONE);
-                    }
+    private void fetchCandidatesFallback() {
+        ApiClient.getApiService(this).getCandidates(pollId).enqueue(new Callback<JsonArray>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonArray> call, @NonNull Response<JsonArray> response) {
+                if (resultsProgressBar != null) {
+                    resultsProgressBar.setVisibility(View.GONE);
+                }
+                if (response.isSuccessful() && response.body() != null) {
                     try {
                         resultsList.clear();
-                        String trimmed = response != null ? response.trim() : "";
-                        JSONArray array = null;
-
-                        if (trimmed.startsWith("[")) {
-                            array = new JSONArray(trimmed);
-                        } else if (trimmed.startsWith("{")) {
-                            JSONObject obj = new JSONObject(trimmed);
-                            if (obj.has("turnout")) {
-                                JSONObject turnout = obj.optJSONObject("turnout");
-                                if (turnout != null) {
-                                    turnoutVotesCast = turnout.optInt("total_votes_cast", 0);
-                                    turnoutApprovedVoters = turnout.optInt("approved_voters", 0);
-                                    turnoutPercentage = turnout.optDouble("turnout_percentage", 0.0);
-                                }
+                        JsonArray array = response.body();
+                        for (int i = 0; i < array.size(); i++) {
+                            if (array.get(i).isJsonObject()) {
+                                resultsList.add(new JSONObject(array.get(i).getAsJsonObject().toString()));
                             }
-                            array = obj.optJSONArray("candidates");
-                            if (array == null) array = obj.optJSONArray("results");
-                            if (array == null) array = obj.optJSONArray("data");
-                        }
-
-                        if (array != null) {
-                            for (int i = 0; i < array.length(); i++) {
-                                resultsList.add(array.getJSONObject(i));
-                            }
-                        }
-
-                        if (adapter != null) {
-                            adapter.notifyDataSetChanged();
                         }
                         renderResults();
-                    } catch (JSONException e) {
-                        Log.e(TAG, "Error parsing fallback results response", e);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error parsing fallback candidates response", e);
                     }
-                },
-                error -> {
-                    if (resultsProgressBar != null) {
-                        resultsProgressBar.setVisibility(View.GONE);
-                    }
+                } else {
                     Toast.makeText(LiveResultsActivity.this, "Error fetching results from server", Toast.LENGTH_SHORT).show();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
             }
-        };
 
-        stringRequest.setRetryPolicy(new com.android.volley.DefaultRetryPolicy(
-                30000,
-                com.android.volley.DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                com.android.volley.DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        requestQueue.add(stringRequest);
+            @Override
+            public void onFailure(@NonNull Call<JsonArray> call, @NonNull Throwable t) {
+                if (resultsProgressBar != null) {
+                    resultsProgressBar.setVisibility(View.GONE);
+                }
+                if (resultsSwipeRefresh != null) {
+                    resultsSwipeRefresh.setRefreshing(false);
+                }
+                Toast.makeText(LiveResultsActivity.this, "Error fetching results from server", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void renderResults() {
@@ -426,85 +366,6 @@ public class LiveResultsActivity extends AppCompatActivity {
 
                 resultsContainer.addView(itemView);
             }
-        }
-    }
-
-    // Custom Adapter to bind JSON data to your Midnight Blue UI cards
-    private class ResultsAdapter extends BaseAdapter {
-        @Override
-        public int getCount() { return resultsList.size(); }
-        @Override
-        public Object getItem(int position) { return resultsList.get(position); }
-        @Override
-        public long getItemId(int position) { return position; }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-            if (convertView == null) {
-                convertView = LayoutInflater.from(LiveResultsActivity.this).inflate(R.layout.item_result, parent, false);
-            }
-
-            TextView nameText = convertView.findViewById(R.id.resultCandidateName);
-            TextView partyText = convertView.findViewById(R.id.candidatePartyText);
-            TextView voteText = convertView.findViewById(R.id.resultVoteCount);
-            TextView voteLabelText = convertView.findViewById(R.id.resultVoteLabel);
-            ImageView avatarImage = convertView.findViewById(R.id.candidateAvatar);
-
-            try {
-                JSONObject candidate = resultsList.get(position);
-                String name = candidate.optString("candidate_name", candidate.optString("name", "Unknown"));
-                String party = candidate.optString("party", candidate.optString("party_name", "Independent"));
-                String photoUrl = candidate.optString("photo_url", candidate.optString("image_url", ""));
-
-                int votes = 0;
-                if (candidate.has("votes")) {
-                    votes = candidate.getInt("votes");
-                } else if (candidate.has("vote_count")) {
-                    votes = candidate.getInt("vote_count");
-                }
-                voteText.setText(String.valueOf(votes));
-                if (voteLabelText != null) {
-                    voteLabelText.setText(votes == 1 ? " vote" : " votes");
-                }
-
-                int totalVotes = 0;
-                for (JSONObject item : resultsList) {
-                    if (item.has("votes")) {
-                        totalVotes += item.optInt("votes");
-                    } else if (item.has("vote_count")) {
-                        totalVotes += item.optInt("vote_count");
-                    }
-                }
-
-                ProgressBar candidateProgressBar = convertView.findViewById(R.id.candidateProgressBar);
-                if (candidateProgressBar != null) {
-                    int percent = (totalVotes > 0) ? (votes * 100 / totalVotes) : 0;
-                    candidateProgressBar.setProgress(percent);
-                }
-
-                if ("CLOSED".equalsIgnoreCase(electionStatus) && position == 0 && votes > 0) {
-                    nameText.setText(name + " (WINNER)");
-                } else {
-                    nameText.setText(name);
-                }
-
-                if (partyText != null) {
-                    partyText.setText(party != null && !party.isEmpty() ? party : "Independent");
-                }
-
-                if (avatarImage != null) {
-                    Glide.with(LiveResultsActivity.this)
-                            .load(photoUrl)
-                            .circleCrop()
-                            .placeholder(android.R.drawable.ic_menu_myplaces)
-                            .error(android.R.drawable.ic_menu_myplaces)
-                            .into(avatarImage);
-                }
-            } catch (JSONException e) {
-                Log.e(TAG, "Error rendering candidate result item", e);
-            }
-
-            return convertView;
         }
     }
 }

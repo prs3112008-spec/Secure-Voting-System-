@@ -9,36 +9,31 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
+
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.biometric.BiometricPrompt;
-import androidx.core.content.ContextCompat;
 
-import java.util.concurrent.Executor;
-
-import com.android.volley.DefaultRetryPolicy;
-import com.android.volley.Request;
-import com.android.volley.RequestQueue;
-import com.android.volley.toolbox.JsonArrayRequest;
-import com.android.volley.toolbox.JsonObjectRequest;
-import com.android.volley.toolbox.Volley;
-
-import org.json.JSONException;
-import org.json.JSONObject;
+import com.example.securevotingapp.network.ApiClient;
+import com.example.securevotingapp.network.models.CandidateItem;
+import com.example.securevotingapp.security.BiometricAuthHelper;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
+
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
 
 public class DashboardActivity extends AppCompatActivity {
 
@@ -55,8 +50,19 @@ public class DashboardActivity extends AppCompatActivity {
                             if (result.getData() != null) {
                                 pendingVerificationToken = result.getData().getStringExtra("verification_token");
                             }
-                            // Liveness passed! Now trigger Fingerprint Prompt
-                            showBiometricPrompt(pendingCandidateId);
+                            // Step 1 Passed (Liveness)! Now Step 2: Hardware Biometric/PIN 2FA Lock
+                            BiometricAuthHelper.authenticate(DashboardActivity.this, new BiometricAuthHelper.BiometricAuthCallback() {
+                                @Override
+                                public void onSuccess() {
+                                    castVote(pendingCandidateId);
+                                }
+
+                                @Override
+                                public void onError(String message) {
+                                    pendingVerificationToken = "";
+                                    Toast.makeText(DashboardActivity.this, "Authentication cancelled or failed.", Toast.LENGTH_SHORT).show();
+                                }
+                            });
                         } else {
                             pendingVerificationToken = "";
                             Toast.makeText(this, "Liveness check cancelled or failed.", Toast.LENGTH_SHORT).show();
@@ -75,27 +81,49 @@ public class DashboardActivity extends AppCompatActivity {
         String description;
         boolean isActive;
         String status;
+        String startTimeIso;
+        String endTimeIso;
 
-        PollItem(int pollId, String title, String description, boolean isActive, String status) {
+        PollItem(int pollId, String title, String description, boolean isActive, String status, String startTimeIso, String endTimeIso) {
             this.pollId = pollId;
             this.title = title;
             this.description = description;
             this.isActive = isActive;
             this.status = status;
+            this.startTimeIso = startTimeIso;
+            this.endTimeIso = endTimeIso;
+        }
+
+        private static long parseIsoToMillis(String isoStr) {
+            if (isoStr == null || isoStr.isEmpty() || isoStr.equalsIgnoreCase("null")) return 0;
+            try {
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US);
+                sdf.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                java.util.Date date = sdf.parse(isoStr.length() >= 19 ? isoStr.substring(0, 19) : isoStr);
+                return (date != null) ? date.getTime() : 0;
+            } catch (Exception e) {
+                return 0;
+            }
         }
 
         @NonNull
         @Override
         public String toString() {
-            String label = "Poll #" + pollId + ": " + title;
-            if ("LIVE".equalsIgnoreCase(status) || isActive) {
-                label += " [LIVE]";
-            } else if ("CLOSED".equalsIgnoreCase(status)) {
-                label += " [CLOSED]";
-            } else if ("UPCOMING".equalsIgnoreCase(status)) {
-                label += " [UPCOMING]";
+            String badge;
+            long now = System.currentTimeMillis();
+            long startMs = parseIsoToMillis(startTimeIso);
+            long endMs = parseIsoToMillis(endTimeIso);
+
+            if (!isActive) {
+                badge = "[PAUSED]";
+            } else if (startMs > 0 && now < startMs) {
+                badge = "[UPCOMING]";
+            } else if (endMs > 0 && now > endMs) {
+                badge = "[ENDED]";
+            } else {
+                badge = "[LIVE]";
             }
-            return label;
+            return badge + " Poll #" + pollId + ": " + title;
         }
     }
 
@@ -105,19 +133,29 @@ public class DashboardActivity extends AppCompatActivity {
     private TextView pollDescriptionText;
     private String currentPollTitle = "Election";
 
-    ListView candidatesListView;
-    ArrayList<String> candidateList = new ArrayList<>();
+    private androidx.swiperefreshlayout.widget.SwipeRefreshLayout dashboardSwipeRefresh;
+    androidx.recyclerview.widget.RecyclerView candidatesRecyclerView;
+    ArrayList<CandidateItem> candidateItemList = new ArrayList<>();
     ArrayList<Integer> candidateIdList = new ArrayList<>(); // Stores the database IDs
-    ArrayList<String> candidatePartyList = new ArrayList<>();
-    ArrayList<String> candidatePhotoList = new ArrayList<>();
     CandidateAdapter adapter;
     int currentPollId = 1; // Default Poll ID
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        fetchPolls();
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
         super.setContentView(R.layout.activity_dashboard);
+
+        dashboardSwipeRefresh = findViewById(R.id.dashboardSwipeRefresh);
+        if (dashboardSwipeRefresh != null) {
+            dashboardSwipeRefresh.setOnRefreshListener(this::fetchPolls);
+        }
 
         Button goToAdminButton = findViewById(R.id.goToAdminButton);
         goToAdminButton.setOnClickListener(v -> {
@@ -146,47 +184,41 @@ public class DashboardActivity extends AppCompatActivity {
             finish();
         });
 
-        candidatesListView = findViewById(R.id.premiumListView);
-        pollSelectorSpinner = findViewById(R.id.pollSelectorSpinner);
-        pollDescriptionText = findViewById(R.id.pollDescriptionText);
+        candidatesRecyclerView = findViewById(R.id.premiumRecyclerView);
+        if (candidatesRecyclerView != null) {
+            candidatesRecyclerView.setLayoutManager(new androidx.recyclerview.widget.LinearLayoutManager(this));
+        }
 
-        pollSpinnerAdapter = new android.widget.ArrayAdapter<>(this, android.R.layout.simple_spinner_item, pollList);
-        pollSpinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        if (pollSelectorSpinner != null) {
-            pollSelectorSpinner.setAdapter(pollSpinnerAdapter);
-            pollSelectorSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-                @Override
-                public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                    if (position >= 0 && position < pollList.size()) {
-                        PollItem selected = pollList.get(position);
-                        if (selected.pollId != currentPollId) {
-                            selectPoll(selected);
-                        }
-                    }
-                }
-                @Override
-                public void onNothingSelected(android.widget.AdapterView<?> parent) {}
-            });
+        View pollSelectorCard = findViewById(R.id.pollSelectorCard);
+        if (pollSelectorCard != null) {
+            pollSelectorCard.setOnClickListener(v -> showPollSelectorBottomSheet());
         }
 
         SharedPreferences sharedPreferences = SecurePrefs.get(this);
         String userRole = sharedPreferences.getString("role", "voter");
 
+        TextView dashboardSubtitleText = findViewById(R.id.dashboardSubtitleText);
         View adminInfoCard = findViewById(R.id.adminInfoCard);
         Button verifyVoteButton = findViewById(R.id.verifyVoteButton);
         ProgressBar dashboardProgressBar = findViewById(R.id.dashboardProgressBar);
         TextView voterEmptyStateText = findViewById(R.id.voterEmptyStateText);
 
         if ("admin".equalsIgnoreCase(userRole)) {
+            if (dashboardSubtitleText != null) {
+                dashboardSubtitleText.setText("Authenticated Administrator Session");
+            }
             goToAdminButton.setVisibility(View.VISIBLE);
-            candidatesListView.setVisibility(View.GONE); // Hides TAP TO VOTE cards for admins
+            if (candidatesRecyclerView != null) candidatesRecyclerView.setVisibility(View.GONE);
             if (adminInfoCard != null) adminInfoCard.setVisibility(View.VISIBLE);
             if (verifyVoteButton != null) verifyVoteButton.setVisibility(View.GONE);
             if (dashboardProgressBar != null) dashboardProgressBar.setVisibility(View.GONE);
             if (voterEmptyStateText != null) voterEmptyStateText.setVisibility(View.GONE);
         } else {
+            if (dashboardSubtitleText != null) {
+                dashboardSubtitleText.setText("Authenticated Voter Session");
+            }
             goToAdminButton.setVisibility(View.GONE);    // Hides Admin Panel button for voters
-            candidatesListView.setVisibility(View.VISIBLE);
+            if (candidatesRecyclerView != null) candidatesRecyclerView.setVisibility(View.VISIBLE);
             if (adminInfoCard != null) adminInfoCard.setVisibility(View.GONE);
             if (verifyVoteButton != null) verifyVoteButton.setVisibility(View.VISIBLE);
         }
@@ -195,51 +227,115 @@ public class DashboardActivity extends AppCompatActivity {
             verifyVoteButton.setOnClickListener(v -> showVerifyVoteDialog());
         }
 
-        adapter = new CandidateAdapter(this, candidateList, candidateIdList, candidatePartyList, candidatePhotoList, () -> userHasVoted, () -> isPollsClosedOrLocked, position -> {
+        adapter = new CandidateAdapter(() -> userHasVoted, () -> isPollsClosedOrLocked, position -> {
             if (position < candidateIdList.size()) {
                 int selectedCandidateId = candidateIdList.get(position);
                 onCandidateClick(selectedCandidateId);
             }
         });
-        candidatesListView.setAdapter(adapter);
-
-        // Detects when candidate in list is tapped
-        candidatesListView.setOnItemClickListener((parent, view, position, id) -> {
-            if (position < candidateIdList.size()) {
-                int selectedCandidateId = candidateIdList.get(position);
-                onCandidateClick(selectedCandidateId);
-            }
-        });
+        if (candidatesRecyclerView != null) {
+            candidatesRecyclerView.setAdapter(adapter);
+        }
 
         fetchPolls();
     }
 
+    private void showPollSelectorBottomSheet() {
+        com.google.android.material.bottomsheet.BottomSheetDialog bottomSheetDialog =
+                new com.google.android.material.bottomsheet.BottomSheetDialog(this);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(48, 36, 48, 36);
+        root.setBackgroundColor(Color.WHITE);
+
+        TextView title = new TextView(this);
+        title.setText("Select Election Poll");
+        title.setTextColor(Color.parseColor("#0F172A"));
+        title.setTextSize(18);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        title.setPadding(0, 0, 0, 24);
+        root.addView(title);
+
+        android.widget.ScrollView scrollView = new android.widget.ScrollView(this);
+        LinearLayout listContainer = new LinearLayout(this);
+        listContainer.setOrientation(LinearLayout.VERTICAL);
+
+        for (PollItem poll : pollList) {
+            com.google.android.material.card.MaterialCardView card = new com.google.android.material.card.MaterialCardView(this);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            params.setMargins(0, 0, 0, 16);
+            card.setLayoutParams(params);
+            card.setCardBackgroundColor(poll.pollId == currentPollId ? Color.parseColor("#F1F5F9") : Color.WHITE);
+            card.setRadius(20f);
+            card.setStrokeColor(poll.pollId == currentPollId ? Color.parseColor("#1E3A8A") : Color.parseColor("#E2E8F0"));
+            card.setStrokeWidth(poll.pollId == currentPollId ? 3 : 1);
+            card.setClickable(true);
+            card.setFocusable(true);
+
+            LinearLayout itemLayout = new LinearLayout(this);
+            itemLayout.setOrientation(LinearLayout.VERTICAL);
+            itemLayout.setPadding(24, 20, 24, 20);
+
+            TextView itemText = new TextView(this);
+            itemText.setText(poll.toString());
+            itemText.setTextColor(Color.parseColor("#0F172A"));
+            itemText.setTextSize(14);
+            itemText.setTypeface(null, android.graphics.Typeface.BOLD);
+
+            itemLayout.addView(itemText);
+
+            if (poll.description != null && !poll.description.isEmpty()) {
+                TextView descText = new TextView(this);
+                descText.setText(poll.description);
+                descText.setTextColor(Color.parseColor("#64748B"));
+                descText.setTextSize(12);
+                descText.setPadding(0, 4, 0, 0);
+                itemLayout.addView(descText);
+            }
+
+            card.addView(itemLayout);
+            card.setOnClickListener(v -> {
+                selectPoll(poll);
+                bottomSheetDialog.dismiss();
+            });
+
+            listContainer.addView(card);
+        }
+
+        scrollView.addView(listContainer);
+        root.addView(scrollView);
+
+        bottomSheetDialog.setContentView(root);
+        bottomSheetDialog.show();
+    }
+
     private void fetchPolls() {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/polls";
-
-        SharedPreferences sharedPreferences = SecurePrefs.get(this);
-        String token = sharedPreferences.getString("jwt_token", null);
-
-        if (token == null) return;
-
-        JsonArrayRequest request = new JsonArrayRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
+        ApiClient.getApiService(this).getPolls().enqueue(new Callback<JsonArray>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonArray> call, @NonNull Response<JsonArray> response) {
+                if (dashboardSwipeRefresh != null) {
+                    dashboardSwipeRefresh.setRefreshing(false);
+                }
+                if (response.isSuccessful() && response.body() != null) {
                     try {
                         pollList.clear();
+                        JsonArray array = response.body();
                         int selectedIndex = 0;
 
-                        for (int i = 0; i < response.length(); i++) {
-                            JSONObject p = response.getJSONObject(i);
-                            int pollId = p.optInt("poll_id", p.optInt("id", 1));
-                            String title = p.optString("title", p.optString("poll_title", "Poll #" + pollId));
-                            String description = p.optString("description", "");
-                            boolean isActive = p.optBoolean("is_active", true);
-                            String status = p.optString("status", isActive ? "LIVE" : "CLOSED");
+                        for (int i = 0; i < array.size(); i++) {
+                            if (!array.get(i).isJsonObject()) continue;
+                            JsonObject p = array.get(i).getAsJsonObject();
+                            int pollId = p.has("poll_id") ? p.get("poll_id").getAsInt() : (p.has("id") ? p.get("id").getAsInt() : 1);
+                            String title = p.has("title") ? p.get("title").getAsString() : (p.has("poll_title") ? p.get("poll_title").getAsString() : "Poll #" + pollId);
+                            String description = p.has("description") ? p.get("description").getAsString() : "";
+                            boolean isActive = !p.has("is_active") || p.get("is_active").getAsBoolean();
+                            String status = p.has("status") ? p.get("status").getAsString() : (isActive ? "LIVE" : "CLOSED");
+                            String startTime = p.has("start_time") && !p.get("start_time").isJsonNull() ? p.get("start_time").getAsString() : "";
+                            String endTime = p.has("end_time") && !p.get("end_time").isJsonNull() ? p.get("end_time").getAsString() : "";
 
-                            PollItem item = new PollItem(pollId, title, description, isActive, status);
+                            PollItem item = new PollItem(pollId, title, description, isActive, status, startTime, endTime);
                             pollList.add(item);
 
                             if ("LIVE".equalsIgnoreCase(status) && selectedIndex == 0) {
@@ -247,37 +343,23 @@ public class DashboardActivity extends AppCompatActivity {
                             }
                         }
 
-                        if (pollSpinnerAdapter != null) {
-                            pollSpinnerAdapter.notifyDataSetChanged();
-                        }
-
                         if (!pollList.isEmpty()) {
-                            if (pollSelectorSpinner != null) {
-                                pollSelectorSpinner.setSelection(selectedIndex);
-                            }
                             selectPoll(pollList.get(selectedIndex));
                         }
-                    } catch (JSONException e) {
+                    } catch (Exception e) {
                         Log.e(TAG, "Error parsing polls response", e);
                     }
-                },
-                error -> Log.e(TAG, "Error fetching polls list", error)
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Authorization", "Bearer " + token);
-                return headers;
+                }
             }
-        };
 
-        request.setRetryPolicy(new DefaultRetryPolicy(
-                30000,
-                DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonArray> call, @NonNull Throwable t) {
+                if (dashboardSwipeRefresh != null) {
+                    dashboardSwipeRefresh.setRefreshing(false);
+                }
+                Log.e(TAG, "Error fetching polls list", t);
+            }
+        });
     }
 
     private void selectPoll(PollItem poll) {
@@ -292,6 +374,12 @@ public class DashboardActivity extends AppCompatActivity {
         userHasVoted = false;
         myVoteReceipt = SecurePrefs.get(this).getString("vote_receipt_poll_" + currentPollId, "");
 
+        TextView voterSelectedPollText = findViewById(R.id.voterSelectedPollText);
+        if (voterSelectedPollText != null) {
+            voterSelectedPollText.setText(poll.toString());
+        }
+
+        TextView pollDescriptionText = findViewById(R.id.pollDescriptionText);
         if (pollDescriptionText != null) {
             if (poll.description != null && !poll.description.isEmpty()) {
                 pollDescriptionText.setText(poll.description);
@@ -301,12 +389,10 @@ public class DashboardActivity extends AppCompatActivity {
             }
         }
 
-        candidateList.clear();
+        candidateItemList.clear();
         candidateIdList.clear();
-        candidatePartyList.clear();
-        candidatePhotoList.clear();
         if (adapter != null) {
-            adapter.notifyDataSetChanged();
+            adapter.submitList(new ArrayList<>());
         }
 
         SharedPreferences sharedPreferences = SecurePrefs.get(this);
@@ -333,6 +419,7 @@ public class DashboardActivity extends AppCompatActivity {
 
         TextView hashView = new TextView(this);
         hashView.setText(voteHash);
+        hashView.setTextIsSelectable(true);
         hashView.setTextColor(Color.parseColor("#1E3A8A"));
         hashView.setTextSize(13);
         hashView.setTypeface(android.graphics.Typeface.MONOSPACE);
@@ -361,8 +448,8 @@ public class DashboardActivity extends AppCompatActivity {
             // USER HAS NOT VOTED YET: Confirm choice first
             String candidateName = "selected candidate";
             int candidateIndex = candidateIdList.indexOf(selectedCandidateId);
-            if (candidateIndex != -1 && candidateIndex < candidateList.size()) {
-                candidateName = candidateList.get(candidateIndex);
+            if (candidateIndex != -1 && candidateIndex < candidateItemList.size()) {
+                candidateName = candidateItemList.get(candidateIndex).getName();
             }
 
             final String finalCandidateName = candidateName;
@@ -404,13 +491,17 @@ public class DashboardActivity extends AppCompatActivity {
 
         com.google.android.material.textfield.TextInputEditText hashInput =
                 new com.google.android.material.textfield.TextInputEditText(inputLayout.getContext());
-        hashInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        hashInput.setSingleLine(false);
+        hashInput.setLines(2);
+        hashInput.setMaxLines(2);
         hashInput.setTextColor(Color.parseColor("#0F172A"));
-        hashInput.setTextSize(14);
+        hashInput.setTextSize(13);
         hashInput.setTypeface(android.graphics.Typeface.MONOSPACE);
 
-        if (myVoteReceipt != null && !myVoteReceipt.isEmpty()) {
-            hashInput.setText(myVoteReceipt);
+        String savedHash = SecurePrefs.get(this).getString("vote_receipt_poll_" + currentPollId, myVoteReceipt);
+        if (savedHash != null && !savedHash.isEmpty()) {
+            myVoteReceipt = savedHash;
+            hashInput.setText(savedHash);
         }
 
         inputLayout.addView(hashInput);
@@ -421,6 +512,7 @@ public class DashboardActivity extends AppCompatActivity {
                 .setMessage("Enter your SHA-256 cryptographic receipt hash to verify ledger status.")
                 .setView(container)
                 .setNegativeButton("Cancel", null)
+                .setNeutralButton("Paste", null)
                 .setPositiveButton("Verify", (d, which) -> {
                     String inputHash = hashInput.getText() != null ? hashInput.getText().toString().trim() : "";
                     if (inputHash.isEmpty()) {
@@ -440,6 +532,21 @@ public class DashboardActivity extends AppCompatActivity {
         if (positiveBtn != null) positiveBtn.setTextColor(Color.parseColor("#1E3A8A"));
         Button negativeBtn = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
         if (negativeBtn != null) negativeBtn.setTextColor(Color.parseColor("#64748B"));
+
+        Button neutralBtn = dialog.getButton(AlertDialog.BUTTON_NEUTRAL);
+        if (neutralBtn != null) {
+            neutralBtn.setTextColor(Color.parseColor("#1E3A8A"));
+            neutralBtn.setOnClickListener(v -> {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip().getItemCount() > 0) {
+                    CharSequence pastedText = clipboard.getPrimaryClip().getItemAt(0).getText();
+                    if (pastedText != null && !pastedText.toString().trim().isEmpty()) {
+                        hashInput.setText(pastedText.toString().trim());
+                        Toast.makeText(DashboardActivity.this, "Pasted from clipboard", Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+        }
     }
 
     private String formatLocalTimestamp(String rawTs) {
@@ -471,17 +578,15 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     private void queryVerifyVote(String hash) {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/verify/" + hash;
-
-        JsonObjectRequest request = new JsonObjectRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
-                    boolean verified = response.optBoolean("verified", true);
-                    boolean chainIntact = response.optBoolean("chain_intact", true);
-                    String rawTs = response.optString("timestamp", response.optString("vote_timestamp", response.optString("created_at", "")));
-                    int blockIndex = response.optInt("block_index", response.optInt("block", response.optInt("index", -1)));
+        ApiClient.getApiService(this).verifyVote(hash).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
+                    boolean verified = !respObj.has("verified") || respObj.get("verified").getAsBoolean();
+                    boolean chainIntact = !respObj.has("chain_intact") || respObj.get("chain_intact").getAsBoolean();
+                    String rawTs = respObj.has("timestamp") ? respObj.get("timestamp").getAsString() : "";
+                    int blockIndex = respObj.has("block_index") ? respObj.get("block_index").getAsInt() : -1;
 
                     String formattedLocalTime = formatLocalTimestamp(rawTs);
 
@@ -514,21 +619,8 @@ public class DashboardActivity extends AppCompatActivity {
 
                     Button posBtn = resultDialog.getButton(AlertDialog.BUTTON_POSITIVE);
                     if (posBtn != null) posBtn.setTextColor(Color.parseColor("#1E3A8A"));
-                },
-                error -> {
-                    String errMessage = "Receipt hash not found in the ledger.";
-                    if (error.networkResponse != null) {
-                        if (error.networkResponse.statusCode == 429) {
-                            errMessage = "Too many attempts. Please wait a few minutes and try again.";
-                        } else if (error.networkResponse.data != null) {
-                            try {
-                                String body = new String(error.networkResponse.data, "UTF-8");
-                                JSONObject errObj = new JSONObject(body);
-                                errMessage = errObj.optString("error", errObj.optString("message", errMessage));
-                            } catch (Exception ignored) {}
-                        }
-                    }
-
+                } else {
+                    String errMessage = ApiClient.parseErrorMessage(response, "Receipt hash not found in the ledger.");
                     AlertDialog errDialog = new AlertDialog.Builder(DashboardActivity.this)
                             .setTitle("Verification Result")
                             .setMessage(errMessage)
@@ -543,47 +635,13 @@ public class DashboardActivity extends AppCompatActivity {
                     Button posBtn = errDialog.getButton(AlertDialog.BUTTON_POSITIVE);
                     if (posBtn != null) posBtn.setTextColor(Color.parseColor("#1E3A8A"));
                 }
-        );
+            }
 
-        request.setRetryPolicy(new DefaultRetryPolicy(
-                30000,
-                DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        Volley.newRequestQueue(this).add(request);
-    }
-
-    private void showBiometricPrompt(int candidateId) {
-        Executor executor = ContextCompat.getMainExecutor(DashboardActivity.this);
-        BiometricPrompt biometricPrompt = new BiometricPrompt(DashboardActivity.this, executor,
-                new BiometricPrompt.AuthenticationCallback() {
-                    @Override
-                    public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
-                        super.onAuthenticationError(errorCode, errString);
-                        Toast.makeText(DashboardActivity.this, "Auth error: " + errString, Toast.LENGTH_SHORT).show();
-                    }
-
-                    @Override
-                    public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
-                        super.onAuthenticationSucceeded(result);
-                        castVote(candidateId);
-                    }
-
-                    @Override
-                    public void onAuthenticationFailed() {
-                        super.onAuthenticationFailed();
-                        Toast.makeText(DashboardActivity.this, "Fingerprint not recognized.", Toast.LENGTH_SHORT).show();
-                    }
-                });
-
-        BiometricPrompt.PromptInfo promptInfo = new BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Verify Identity")
-                .setSubtitle("Confirm your fingerprint to cast your secure vote")
-                .setNegativeButtonText("Cancel")
-                .build();
-
-        biometricPrompt.authenticate(promptInfo);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Toast.makeText(DashboardActivity.this, "Error connecting to verification server", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void fetchCandidates() {
@@ -596,16 +654,7 @@ public class DashboardActivity extends AppCompatActivity {
         if ("admin".equalsIgnoreCase(userRole)) {
             if (progressBar != null) progressBar.setVisibility(View.GONE);
             if (emptyStateText != null) emptyStateText.setVisibility(View.GONE);
-            if (candidatesListView != null) candidatesListView.setVisibility(View.GONE);
-            return;
-        }
-
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/candidates/" + currentPollId;
-        String token = sharedPreferences.getString("jwt_token", null);
-
-        if (token == null) {
-            Toast.makeText(this, "Session expired. Please log in again.", Toast.LENGTH_SHORT).show();
-            finish();
+            if (candidatesRecyclerView != null) candidatesRecyclerView.setVisibility(View.GONE);
             return;
         }
 
@@ -613,72 +662,61 @@ public class DashboardActivity extends AppCompatActivity {
             progressBar.setVisibility(View.VISIBLE);
         }
 
-        JsonArrayRequest jsonArrayRequest = new JsonArrayRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
-                    if (progressBar != null) {
-                        progressBar.setVisibility(View.GONE);
-                    }
+        ApiClient.getApiService(this).getCandidates(currentPollId).enqueue(new Callback<JsonArray>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonArray> call, @NonNull Response<JsonArray> response) {
+                if (progressBar != null) {
+                    progressBar.setVisibility(View.GONE);
+                }
+                if (response.isSuccessful() && response.body() != null) {
                     try {
-                        candidateList.clear();
+                        candidateItemList.clear();
                         candidateIdList.clear();
-                        candidatePartyList.clear();
-                        candidatePhotoList.clear();
 
-                        for (int i = 0; i < response.length(); i++) {
-                            JSONObject candidate = response.getJSONObject(i);
+                        JsonArray array = response.body();
+                        for (int i = 0; i < array.size(); i++) {
+                            if (!array.get(i).isJsonObject()) continue;
+                            JsonObject candidate = array.get(i).getAsJsonObject();
 
-                            String name = candidate.optString("candidate_name", candidate.optString("name", "Unknown"));
-                            int candidateId = candidate.getInt("candidate_id");
-                            String party = candidate.optString("party", candidate.optString("party_name", "Independent"));
-                            String photoUrl = candidate.optString("photo_url", candidate.optString("image_url", ""));
+                            String name = candidate.has("candidate_name") ? candidate.get("candidate_name").getAsString() : (candidate.has("name") ? candidate.get("name").getAsString() : "Unknown");
+                            int candidateId = candidate.has("candidate_id") ? candidate.get("candidate_id").getAsInt() : 0;
+                            String party = candidate.has("party") ? candidate.get("party").getAsString() : "Independent";
+                            String photoUrl = candidate.has("photo_url") ? candidate.get("photo_url").getAsString() : "";
 
-                            candidateList.add(name);
+                            candidateItemList.add(new CandidateItem(candidateId, name, party, photoUrl));
                             candidateIdList.add(candidateId);
-                            candidatePartyList.add(party);
-                            candidatePhotoList.add(photoUrl);
                         }
                         if (adapter != null) {
-                            adapter.notifyDataSetChanged();
+                            adapter.submitList(new ArrayList<>(candidateItemList));
                         }
 
-                        if (candidateList.isEmpty()) {
-                            if (emptyStateText != null) emptyStateText.setVisibility(View.VISIBLE);
-                            if (candidatesListView != null) candidatesListView.setVisibility(View.GONE);
+                        if (candidateItemList.isEmpty()) {
+                            if (emptyStateText != null) {
+                                emptyStateText.setText("No candidates have been added to this poll yet.");
+                                emptyStateText.setVisibility(View.VISIBLE);
+                            }
+                            if (candidatesRecyclerView != null) candidatesRecyclerView.setVisibility(View.GONE);
                         } else {
                             if (emptyStateText != null) emptyStateText.setVisibility(View.GONE);
-                            if (candidatesListView != null) candidatesListView.setVisibility(View.VISIBLE);
+                            if (candidatesRecyclerView != null) candidatesRecyclerView.setVisibility(View.VISIBLE);
                         }
-                    } catch (JSONException e) {
+                    } catch (Exception e) {
                         Log.e(TAG, "Error parsing candidate data", e);
                         Toast.makeText(DashboardActivity.this, "Error parsing data", Toast.LENGTH_SHORT).show();
                     }
-                },
-                error -> {
-                    if (progressBar != null) {
-                        progressBar.setVisibility(View.GONE);
-                    }
+                } else {
                     Toast.makeText(DashboardActivity.this, "Error fetching candidates", Toast.LENGTH_LONG).show();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Authorization", "Bearer " + token);
-                return headers;
             }
-        };
 
-        jsonArrayRequest.setRetryPolicy(new DefaultRetryPolicy(
-                30000,
-                DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        RequestQueue queue = Volley.newRequestQueue(this);
-        queue.add(jsonArrayRequest);
+            @Override
+            public void onFailure(@NonNull Call<JsonArray> call, @NonNull Throwable t) {
+                if (progressBar != null) {
+                    progressBar.setVisibility(View.GONE);
+                }
+                Toast.makeText(DashboardActivity.this, "Error fetching candidates", Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     private long parseIsoToMillis(String isoStr) {
@@ -694,28 +732,27 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     private void checkElectionStatus() {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/election-status/" + currentPollId;
-
-        JsonObjectRequest request = new JsonObjectRequest(
-                Request.Method.GET, url, null,
-                response -> {
-                    String status = response.optString("status", "LIVE");
+        ApiClient.getApiService(this).getElectionStatus(currentPollId).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
                     TextView banner = findViewById(R.id.electionStatusBanner);
                     TextView countdownText = findViewById(R.id.countdownText);
                     com.google.android.material.card.MaterialCardView countdownCard = findViewById(R.id.countdownCard);
-                    View candidateContainer = findViewById(R.id.premiumListView);
+                    View candidateContainer = findViewById(R.id.premiumRecyclerView);
 
                     SharedPreferences sharedPreferences = SecurePrefs.get(DashboardActivity.this);
                     String userRole = sharedPreferences.getString("role", "voter");
                     boolean isAdmin = "admin".equalsIgnoreCase(userRole);
 
-                    long serverTimeMillis = parseIsoToMillis(response.optString("server_time_utc", ""));
+                    long serverTimeMillis = parseIsoToMillis(respObj.has("server_time_utc") ? respObj.get("server_time_utc").getAsString() : "");
                     long timeOffsetMillis = (serverTimeMillis > 0) ? (serverTimeMillis - System.currentTimeMillis()) : 0;
                     long currentUtcMillis = System.currentTimeMillis() + timeOffsetMillis;
 
-                    long startTimeMillis = parseIsoToMillis(response.optString("start_time", ""));
-                    long endTimeMillis = parseIsoToMillis(response.optString("end_time", ""));
-                    boolean isActive = response.optBoolean("is_active", true);
+                    long startTimeMillis = parseIsoToMillis(respObj.has("start_time") ? respObj.get("start_time").getAsString() : "");
+                    long endTimeMillis = parseIsoToMillis(respObj.has("end_time") ? respObj.get("end_time").getAsString() : "");
+                    boolean isActive = !respObj.has("is_active") || respObj.get("is_active").getAsBoolean();
 
                     if (countDownTimer != null) {
                         countDownTimer.cancel();
@@ -735,7 +772,6 @@ public class DashboardActivity extends AppCompatActivity {
                         return;
                     }
 
-                    // Safeguard: is_active is true and end_time is null/empty/0
                     if (endTimeMillis <= 0 && startTimeMillis <= 0) {
                         isPollsClosedOrLocked = false;
                         if (banner != null) banner.setVisibility(View.GONE);
@@ -818,17 +854,14 @@ public class DashboardActivity extends AppCompatActivity {
                             checkElectionStatus();
                         }
                     }.start();
-                },
-                error -> Log.e(TAG, "Failed to fetch election status")
-        );
+                }
+            }
 
-        request.setRetryPolicy(new DefaultRetryPolicy(
-                30000,
-                DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Log.e(TAG, "Failed to fetch election status", t);
+            }
+        });
     }
 
     @Override
@@ -840,60 +873,72 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     private void checkVoteStatus() {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/status/" + currentPollId;
+        ApiClient.getApiService(this).getVoteStatus(currentPollId).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
+                    boolean hasVoted = (respObj.has("hasVoted") && respObj.get("hasVoted").getAsBoolean()) ||
+                                       (respObj.has("has_voted") && respObj.get("has_voted").getAsBoolean());
 
-        SharedPreferences sharedPreferences = SecurePrefs.get(this);
-        String token = sharedPreferences.getString("jwt_token", null);
-
-        JsonObjectRequest jsonObjectRequest = new JsonObjectRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
-                    boolean hasVoted = response.optBoolean("hasVoted", false);
+                    View voterVotedBanner = findViewById(R.id.voterVotedBanner);
                     if (hasVoted) {
                         userHasVoted = true;
-                        myVoteReceipt = SecurePrefs.get(this).getString("vote_receipt_poll_" + currentPollId, "");
+                        if (voterVotedBanner != null) voterVotedBanner.setVisibility(View.VISIBLE);
 
-                        // Refresh the list so the buttons update their colors
+                        String serverHash = "";
+                        if (respObj.has("receipt_hash") && !respObj.get("receipt_hash").isJsonNull()) {
+                            serverHash = respObj.get("receipt_hash").getAsString();
+                        } else if (respObj.has("hash") && !respObj.get("hash").isJsonNull()) {
+                            serverHash = respObj.get("hash").getAsString();
+                        } else if (respObj.has("current_hash") && !respObj.get("current_hash").isJsonNull()) {
+                            serverHash = respObj.get("current_hash").getAsString();
+                        }
+
+                        if (!serverHash.isEmpty()) {
+                            myVoteReceipt = serverHash;
+                            SecurePrefs.get(DashboardActivity.this).edit().putString("vote_receipt_poll_" + currentPollId, serverHash).apply();
+                        } else {
+                            myVoteReceipt = SecurePrefs.get(DashboardActivity.this).getString("vote_receipt_poll_" + currentPollId, "");
+                        }
+
+                        if (adapter != null) {
+                            adapter.notifyDataSetChanged();
+                        }
+                    } else {
+                        // Server responds has_voted == false -> Authoritative source of truth: reset state & purge stale receipt
+                        userHasVoted = false;
+                        myVoteReceipt = "";
+                        if (voterVotedBanner != null) voterVotedBanner.setVisibility(View.GONE);
+                        SecurePrefs.get(DashboardActivity.this).edit().remove("vote_receipt_poll_" + currentPollId).apply();
+
                         if (adapter != null) {
                             adapter.notifyDataSetChanged();
                         }
                     }
-                },
-                error -> Log.e(TAG, "Error fetching vote status")
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Authorization", "Bearer " + token);
-                return headers;
+                }
             }
-        };
 
-        jsonObjectRequest.setRetryPolicy(new DefaultRetryPolicy(
-                30000,
-                DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        RequestQueue queue = Volley.newRequestQueue(this);
-        queue.add(jsonObjectRequest);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Log.e(TAG, "Error fetching vote status", t);
+            }
+        });
     }
 
     private void showVoteReceiptDialog(String voteHash) {
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Vote Confirmed & Secured")
+                .setTitle("Ballot Recorded — Cryptographic Receipt")
                 .setMessage("Your vote is recorded in the tamper-evident hash chain.\n\nBallot Secrecy Note: Save this receipt hash—for ballot secrecy, the server does not link it to your account.")
                 .setView(createReceiptView(voteHash))
                 .setCancelable(false)
-                .setNeutralButton("Copy Hash", (d, which) -> {
+                .setNeutralButton("Copy Receipt", (d, which) -> {
                     ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                    ClipData clip = ClipData.newPlainText("Vote Receipt Hash", voteHash);
+                    ClipData clip = ClipData.newPlainText("Ballot Receipt", voteHash);
                     if (clipboard != null) {
                         clipboard.setPrimaryClip(clip);
                     }
-                    Toast.makeText(DashboardActivity.this, "Receipt hash copied!", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(DashboardActivity.this, "Receipt hash copied to clipboard", Toast.LENGTH_SHORT).show();
                 })
                 .setPositiveButton("Done", (d, which) -> d.dismiss())
                 .create();
@@ -910,35 +955,35 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     private void castVote(int candidateId) {
-        // This is your Node.js backend endpoint for casting votes
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/cast";
-
-        SharedPreferences sharedPreferences = SecurePrefs.get(this);
-        String token = sharedPreferences.getString("jwt_token", null);
-
-        // We package poll_id, candidate_id, and verification_token into the request
-        JSONObject requestBody = new JSONObject();
-        try {
-            requestBody.put("poll_id", currentPollId);          // Current Selected Poll ID
-            requestBody.put("candidate_id", candidateId); // The candidate you tapped
-            if (pendingVerificationToken != null && !pendingVerificationToken.isEmpty()) {
-                requestBody.put("verification_token", pendingVerificationToken);
-            }
-        } catch (JSONException e) {
-            Log.e(TAG, "Error building request body", e);
+        JsonObject requestBody = new JsonObject();
+        requestBody.addProperty("poll_id", currentPollId);
+        requestBody.addProperty("candidate_id", candidateId);
+        if (pendingVerificationToken != null && !pendingVerificationToken.isEmpty()) {
+            requestBody.addProperty("verification_token", pendingVerificationToken);
         }
 
-        JsonObjectRequest jsonObjectRequest = new JsonObjectRequest(
-                Request.Method.POST,
-                url,
-                requestBody,
-                response -> {
-                    pendingVerificationToken = "";
+        ApiClient.getApiService(this).castVote(requestBody).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                pendingVerificationToken = "";
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
                     userHasVoted = true;
-                    String receipt = response.optString("current_hash", response.optString("hash", response.optString("receipt_hash", "")));
+
+                    String receipt = "";
+                    if (respObj.has("receipt_hash") && !respObj.get("receipt_hash").isJsonNull()) {
+                        receipt = respObj.get("receipt_hash").getAsString();
+                    } else if (respObj.has("receiptHash") && !respObj.get("receiptHash").isJsonNull()) {
+                        receipt = respObj.get("receiptHash").getAsString();
+                    } else if (respObj.has("current_hash") && !respObj.get("current_hash").isJsonNull()) {
+                        receipt = respObj.get("current_hash").getAsString();
+                    } else if (respObj.has("hash") && !respObj.get("hash").isJsonNull()) {
+                        receipt = respObj.get("hash").getAsString();
+                    }
+
                     if (!receipt.isEmpty()) {
                         myVoteReceipt = receipt;
-                        SecurePrefs.get(this).edit().putString("vote_receipt_poll_" + currentPollId, receipt).apply();
+                        SecurePrefs.get(DashboardActivity.this).edit().putString("vote_receipt_poll_" + currentPollId, receipt).apply();
                         showVoteReceiptDialog(receipt);
                     } else {
                         Toast.makeText(DashboardActivity.this, "Vote cast successfully!", Toast.LENGTH_LONG).show();
@@ -947,124 +992,17 @@ public class DashboardActivity extends AppCompatActivity {
                     if (adapter != null) {
                         adapter.notifyDataSetChanged();
                     }
-                },
-                error -> {
-                    pendingVerificationToken = "";
-                    String displayMsg = "Network error. Please check your connection.";
-                    if (error.networkResponse != null && error.networkResponse.statusCode == 429) {
-                        displayMsg = "Too many attempts. Please wait a few minutes and try again.";
-                    } else if (error instanceof com.android.volley.TimeoutError) {
-                        displayMsg = "Server took too long to respond. Try again.";
-                    } else if (error.networkResponse != null && error.networkResponse.data != null) {
-                        try {
-                            String body = new String(error.networkResponse.data, "UTF-8");
-                            JSONObject errObj = new JSONObject(body);
-                            if (errObj.has("error")) {
-                                displayMsg = errObj.getString("error");
-                            } else if (errObj.has("message")) {
-                                displayMsg = errObj.getString("message");
-                            }
-                        } catch (Exception e) {
-                            displayMsg = "Unable to process vote. Please try again.";
-                        }
-                    }
+                } else {
+                    String displayMsg = ApiClient.parseErrorMessage(response, "Unable to process vote. Please try again.");
                     Toast.makeText(getApplicationContext(), displayMsg, Toast.LENGTH_LONG).show();
                 }
-        ) {
+            }
+
             @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Authorization", "Bearer " + token);
-                headers.put("Content-Type", "application/json");
-                return headers;
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                pendingVerificationToken = "";
+                Toast.makeText(getApplicationContext(), "Network error. Please check your connection.", Toast.LENGTH_LONG).show();
             }
-        };
-
-        jsonObjectRequest.setRetryPolicy(new DefaultRetryPolicy(
-                60000,
-                0,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        RequestQueue queue = Volley.newRequestQueue(this);
-        queue.add(jsonObjectRequest);
-    }
-
-    // Sends the POST request to cast vote
-    private void castVote(int pollId, int candidateId) {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/votes/cast";
-
-        SharedPreferences sharedPreferences = SecurePrefs.get(this);
-        String token = sharedPreferences.getString("jwt_token", null);
-
-        // 1. Create the JSON body required by backend
-        JSONObject jsonBody = new JSONObject();
-        try {
-            jsonBody.put("poll_id", pollId);
-            jsonBody.put("candidate_id", candidateId);
-            if (pendingVerificationToken != null && !pendingVerificationToken.isEmpty()) {
-                jsonBody.put("verification_token", pendingVerificationToken);
-            }
-        } catch (JSONException e) {
-            Log.e(TAG, "Error building vote request body", e);
-        }
-
-        // 2. Make the POST request
-        JsonObjectRequest jsonObjectRequest = new JsonObjectRequest(
-                Request.Method.POST,
-                url,
-                jsonBody,
-                response -> {
-                    pendingVerificationToken = "";
-                    userHasVoted = true;
-                    String receipt = response.optString("current_hash", response.optString("hash", response.optString("receipt_hash", "")));
-                    if (!receipt.isEmpty()) {
-                        myVoteReceipt = receipt;
-                        SecurePrefs.get(this).edit().putString("vote_receipt_poll_" + pollId, receipt).apply();
-                        showVoteReceiptDialog(receipt);
-                    } else {
-                        try {
-                            String msg = response.optString("message", "Vote cast successfully!");
-                            Toast.makeText(DashboardActivity.this, msg, Toast.LENGTH_LONG).show();
-                        } catch (Exception ignored) {}
-                    }
-                    checkVoteStatus();
-                    if (adapter != null) {
-                        adapter.notifyDataSetChanged();
-                    }
-                },
-                error -> {
-                    pendingVerificationToken = "";
-                    String errorMessage = "Unable to process vote. Please try again.";
-                    if (error.networkResponse != null && error.networkResponse.data != null) {
-                        try {
-                            String body = new String(error.networkResponse.data, "UTF-8");
-                            JSONObject errObj = new JSONObject(body);
-                            String serverMsg = errObj.optString("error", errObj.optString("message", ""));
-                            if (!serverMsg.isEmpty()) {
-                                errorMessage = serverMsg;
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                    Toast.makeText(DashboardActivity.this, errorMessage, Toast.LENGTH_LONG).show();
-                }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Content-Type", "application/json; charset=utf-8");
-                headers.put("Authorization", "Bearer " + token);
-                return headers;
-            }
-        };
-
-        jsonObjectRequest.setRetryPolicy(new DefaultRetryPolicy(
-                60000,
-                0,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        RequestQueue queue = Volley.newRequestQueue(this);
-        queue.add(jsonObjectRequest);
+        });
     }
 }

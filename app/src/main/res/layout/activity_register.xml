@@ -144,6 +144,17 @@
                         android:textSize="15sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
+                <!-- Privacy & Biometric Consent Checkbox -->
+                <com.google.android.material.checkbox.MaterialCheckBox
+                    android:id="@+id/consentCheckBox"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="16dp"
+                    android:text="I agree to the Privacy Policy and consent to encrypted biometric face verification for election eligibility."
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp"
+                    app:buttonTint="@color/primary_navy" />
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/registerSubmitButton"
                     android:layout_width="match_parent"
@@ -154,6 +165,19 @@
                     android:backgroundTint="@color/primary_navy"
                     android:textColor="@color/white"
                     app:cornerRadius="10dp" />
+
+                <TextView
+                    android:id="@+id/goToLoginText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:layout_marginTop="16dp"
+                    android:text="Already registered? Sign in"
+                    android:textColor="@color/primary_navy"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:clickable="true"
+                    android:focusable="true" />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>

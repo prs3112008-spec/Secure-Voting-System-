@@ -3,25 +3,21 @@ package com.example.securevotingapp;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
-import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.Toast;
+
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.app.AppCompatDelegate;
 
-import com.android.volley.DefaultRetryPolicy;
-import com.android.volley.Request;
-import com.android.volley.RequestQueue;
-import com.android.volley.toolbox.JsonObjectRequest;
-import com.android.volley.toolbox.Volley;
+import com.example.securevotingapp.network.ApiClient;
+import com.google.gson.JsonObject;
 
-import org.json.JSONException;
-import org.json.JSONObject;
-
-import java.util.HashMap;
-import java.util.Map;
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -58,103 +54,52 @@ public class MainActivity extends AppCompatActivity {
         goToRegisterButton.setOnClickListener(v -> {
             startActivity(new Intent(MainActivity.this, RegisterActivity.class));
         });
+
+        android.widget.TextView forgotPasswordText = findViewById(R.id.forgotPasswordText);
+        if (forgotPasswordText != null) {
+            forgotPasswordText.setOnClickListener(v -> {
+                startActivity(new Intent(MainActivity.this, ForgotPasswordActivity.class));
+            });
+        }
     }
 
     private void loginVoter(String voterId, String password) {
-        String url = "https://secure-voting-system-9rnd.onrender.com/api/auth/login";
+        JsonObject body = new JsonObject();
+        body.addProperty("email", voterId);
+        body.addProperty("password", password);
 
-        JSONObject jsonBody = new JSONObject();
-        try {
-            jsonBody.put("email", voterId);
-            jsonBody.put("password", password);
-        } catch (JSONException e) {
-            Log.e(TAG, "Error building JSON request body", e);
-        }
+        ApiClient.getApiService(this).login(body).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
+                    String token = respObj.has("token") ? respObj.get("token").getAsString() : "";
+                    String role = respObj.has("role") ? respObj.get("role").getAsString() : "voter";
 
-        JsonObjectRequest jsonObjectRequest = new JsonObjectRequest(
-                Request.Method.POST,
-                url,
-                jsonBody,
-                response -> {
-                    try {
-                        // 1. Grab the token and role from the backend
-                        String token = response.getString("token");
-                        String role = response.optString("role", "voter");
+                    SharedPreferences sharedPreferences = SecurePrefs.get(MainActivity.this);
+                    SharedPreferences.Editor editor = sharedPreferences.edit();
+                    editor.putString("jwt_token", token);
+                    editor.putString("role", role);
+                    editor.apply();
 
-                        // 2. Save it securely on the phone using EncryptedSharedPreferences
-                        SharedPreferences sharedPreferences = SecurePrefs.get(MainActivity.this);
-                        SharedPreferences.Editor editor = sharedPreferences.edit();
-                        editor.putString("jwt_token", token);
-                        editor.putString("role", role);
-                        editor.apply();
+                    Toast.makeText(MainActivity.this, "Login Successful!", Toast.LENGTH_SHORT).show();
 
-                        Toast.makeText(MainActivity.this, "Login Successful!", Toast.LENGTH_SHORT).show();
-
-                        // 3. Jump to the new Dashboard screen
-                        Intent intent = new Intent(MainActivity.this, DashboardActivity.class);
-                        startActivity(intent);
-                        finish(); // Close login screen
-
-                    } catch (JSONException e) {
-                        Log.e(TAG, "Error parsing login response", e);
-                        if (loginButton != null) {
-                            loginButton.setEnabled(true);
-                            loginButton.setText("Verify & Authenticate");
-                        }
-                    }
-                },
-                error -> {
-                    boolean isPendingApproval = false;
-                    boolean isRateLimited = false;
-                    boolean isUnauthorized = false;
+                    Intent intent = new Intent(MainActivity.this, DashboardActivity.class);
+                    startActivity(intent);
+                    finish();
+                } else {
+                    int statusCode = response.code();
+                    boolean isUnauthorized = (statusCode == 401);
+                    boolean isPendingApproval = (statusCode == 403);
+                    boolean isRateLimited = (statusCode == 429);
                     int retrySeconds = 15;
-                    String displayMsg = "Network error. Please check your connection.";
 
-                    if (error.networkResponse != null) {
-                        int statusCode = error.networkResponse.statusCode;
+                    String displayMsg = ApiClient.parseErrorMessage(response, "Login failed. Please check credentials.");
 
-                        if (statusCode == 401) {
-                            isUnauthorized = true;
-                            displayMsg = "Invalid email or password. Please try again.";
-                        } else if (statusCode == 403) {
-                            isPendingApproval = true;
-                            displayMsg = "Your account is pending Admin approval. Please wait for an administrator to approve your account before logging in.";
-                        } else if (statusCode == 429) {
-                            isRateLimited = true;
-                            displayMsg = "Too many attempts. Please wait a few minutes and try again.";
-                        }
-
-                        if (error.networkResponse.data != null) {
-                            try {
-                                String body = new String(error.networkResponse.data, "UTF-8");
-                                JSONObject errObj = new JSONObject(body);
-                                String serverMsg = errObj.optString("error", errObj.optString("message", ""));
-                                if (!serverMsg.isEmpty()) {
-                                    displayMsg = serverMsg;
-                                    if (serverMsg.toLowerCase().contains("pending") || serverMsg.toLowerCase().contains("approval") || statusCode == 403) {
-                                        isPendingApproval = true;
-                                    }
-                                }
-                                if (errObj.has("retryAfterSeconds")) {
-                                    retrySeconds = errObj.optInt("retryAfterSeconds", 15);
-                                }
-                            } catch (Exception e) {
-                                if (statusCode == 403) {
-                                    isPendingApproval = true;
-                                }
-                            }
-                        }
-
-                        if (isRateLimited && retrySeconds == 15 && error.networkResponse.headers != null) {
-                            String headerVal = error.networkResponse.headers.get("Retry-After");
-                            if (headerVal != null) {
-                                try {
-                                    retrySeconds = Integer.parseInt(headerVal.trim());
-                                } catch (Exception ignored) {}
-                            }
-                        }
-                    } else if (error instanceof com.android.volley.TimeoutError) {
-                        displayMsg = "Server took too long to respond. Try again.";
+                    if (response.headers().get("Retry-After") != null) {
+                        try {
+                            retrySeconds = Integer.parseInt(response.headers().get("Retry-After").trim());
+                        } catch (Exception ignored) {}
                     }
 
                     if (isUnauthorized) {
@@ -225,23 +170,25 @@ public class MainActivity extends AppCompatActivity {
                         Toast.makeText(getApplicationContext(), displayMsg, Toast.LENGTH_LONG).show();
                     }
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Content-Type", "application/json; charset=utf-8");
-                return headers;
             }
-        };
 
-        jsonObjectRequest.setRetryPolicy(new DefaultRetryPolicy(
-                60000, // Wait up to 60 seconds for Render cold starts
-                0,     // 0 retries to prevent duplicate submissions
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                if (loginButton != null) {
+                    loginButton.setEnabled(true);
+                    loginButton.setText("Verify & Authenticate");
+                }
+                boolean isTimeout = (t instanceof java.net.SocketTimeoutException) ||
+                                    (t instanceof java.io.InterruptedIOException) ||
+                                    (t.getMessage() != null && t.getMessage().toLowerCase().contains("timeout"));
 
-        RequestQueue queue = Volley.newRequestQueue(this);
-        queue.add(jsonObjectRequest);
+                String errorMsg = isTimeout
+                        ? "Election server is waking up, please tap Sign In again in a few seconds."
+                        : "Network error. Please check connection.";
+
+                Toast.makeText(getApplicationContext(), errorMsg, Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     @Override

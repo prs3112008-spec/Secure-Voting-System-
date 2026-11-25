@@ -5,17 +5,17 @@ import android.graphics.Color;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
 import android.widget.ImageView;
 import android.widget.TextView;
 import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import androidx.recyclerview.widget.DiffUtil;
+import androidx.recyclerview.widget.ListAdapter;
+import androidx.recyclerview.widget.RecyclerView;
 
 import com.bumptech.glide.Glide;
+import com.example.securevotingapp.network.models.CandidateItem;
 
-import java.util.ArrayList;
-
-public class CandidateAdapter extends ArrayAdapter<String> {
+public class CandidateAdapter extends ListAdapter<CandidateItem, CandidateAdapter.CandidateViewHolder> {
 
     public interface OnVoteClickListener {
         void onVoteClick(int position);
@@ -29,25 +29,26 @@ public class CandidateAdapter extends ArrayAdapter<String> {
         boolean isPollClosed();
     }
 
-    private final ArrayList<Integer> candidateIdList;
-    private final ArrayList<String> partyList;
-    private final ArrayList<String> photoUrlList;
     private final HasVotedProvider hasVotedProvider;
     private final PollStatusProvider pollStatusProvider;
     private final OnVoteClickListener voteClickListener;
 
-    public CandidateAdapter(Context context,
-                            ArrayList<String> candidates,
-                            ArrayList<Integer> candidateIdList,
-                            ArrayList<String> partyList,
-                            ArrayList<String> photoUrlList,
-                            HasVotedProvider hasVotedProvider,
+    private static final DiffUtil.ItemCallback<CandidateItem> DIFF_CALLBACK = new DiffUtil.ItemCallback<CandidateItem>() {
+        @Override
+        public boolean areItemsTheSame(@NonNull CandidateItem oldItem, @NonNull CandidateItem newItem) {
+            return oldItem.getCandidateId() == newItem.getCandidateId();
+        }
+
+        @Override
+        public boolean areContentsTheSame(@NonNull CandidateItem oldItem, @NonNull CandidateItem newItem) {
+            return oldItem.equals(newItem);
+        }
+    };
+
+    public CandidateAdapter(HasVotedProvider hasVotedProvider,
                             PollStatusProvider pollStatusProvider,
                             OnVoteClickListener voteClickListener) {
-        super(context, 0, candidates);
-        this.candidateIdList = candidateIdList;
-        this.partyList = partyList;
-        this.photoUrlList = photoUrlList;
+        super(DIFF_CALLBACK);
         this.hasVotedProvider = hasVotedProvider;
         this.pollStatusProvider = pollStatusProvider;
         this.voteClickListener = voteClickListener;
@@ -55,67 +56,66 @@ public class CandidateAdapter extends ArrayAdapter<String> {
 
     @NonNull
     @Override
-    public View getView(int position, @Nullable View convertView, @NonNull ViewGroup parent) {
-        if (convertView == null) {
-            convertView = LayoutInflater.from(getContext()).inflate(R.layout.item_candidate, parent, false);
+    public CandidateViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+        View view = LayoutInflater.from(parent.getContext()).inflate(R.layout.item_candidate, parent, false);
+        return new CandidateViewHolder(view);
+    }
+
+    @Override
+    public void onBindViewHolder(@NonNull CandidateViewHolder holder, int position) {
+        CandidateItem item = getItem(position);
+        Context context = holder.itemView.getContext();
+
+        holder.nameTextView.setText(item.getName() != null ? item.getName() : "Unknown");
+        holder.partyTextView.setText(item.getParty() != null && !item.getParty().isEmpty() ? item.getParty() : "Independent");
+
+        Glide.with(context)
+                .load(item.getPhotoUrl())
+                .circleCrop()
+                .placeholder(android.R.drawable.ic_menu_myplaces)
+                .error(android.R.drawable.ic_menu_myplaces)
+                .into(holder.avatarImageView);
+
+        boolean userHasVoted = (hasVotedProvider != null) && hasVotedProvider.hasVoted();
+        boolean isClosed = (pollStatusProvider != null) && pollStatusProvider.isPollClosed();
+
+        if (isClosed) {
+            holder.voteButton.setEnabled(false);
+            holder.voteButton.setText("POLLS CLOSED");
+            holder.voteButton.setBackgroundColor(Color.parseColor("#94A3B8"));
+            holder.voteButton.setTextColor(Color.WHITE);
+        } else if (userHasVoted) {
+            holder.voteButton.setEnabled(true);
+            holder.voteButton.setText("BALLOT RECORDED");
+            holder.voteButton.setBackgroundColor(Color.parseColor("#94A3B8"));
+            holder.voteButton.setTextColor(Color.WHITE);
+        } else {
+            holder.voteButton.setEnabled(true);
+            holder.voteButton.setText("TAP TO VOTE");
+            holder.voteButton.setBackgroundColor(Color.parseColor("#1E3A8A"));
+            holder.voteButton.setTextColor(Color.WHITE);
         }
 
-        String candidateName = getItem(position);
-        String party = (partyList != null && position < partyList.size()) ? partyList.get(position) : "Independent";
-        String photoUrl = (photoUrlList != null && position < photoUrlList.size()) ? photoUrlList.get(position) : null;
-
-        TextView nameTextView = convertView.findViewById(R.id.candidateNameText);
-        if (nameTextView != null && candidateName != null) {
-            nameTextView.setText(candidateName);
-        }
-
-        TextView partyTextView = convertView.findViewById(R.id.candidatePartyText);
-        if (partyTextView != null) {
-            partyTextView.setText(party != null && !party.isEmpty() ? party : "Independent");
-        }
-
-        ImageView avatarImageView = convertView.findViewById(R.id.candidateAvatar);
-        if (avatarImageView != null) {
-            Glide.with(getContext())
-                    .load(photoUrl)
-                    .circleCrop()
-                    .placeholder(android.R.drawable.ic_menu_myplaces)
-                    .error(android.R.drawable.ic_menu_myplaces)
-                    .into(avatarImageView);
-        }
-
-        TextView voteButton = convertView.findViewById(R.id.voteButton);
-        if (voteButton != null) {
-            boolean userHasVoted = (hasVotedProvider != null) && hasVotedProvider.hasVoted();
-            boolean isClosed = (pollStatusProvider != null) && pollStatusProvider.isPollClosed();
-
-            if (isClosed) {
-                voteButton.setEnabled(false);
-                voteButton.setText("POLLS CLOSED");
-                voteButton.setBackgroundColor(Color.parseColor("#94A3B8"));
-                voteButton.setTextColor(Color.WHITE);
-            } else if (userHasVoted) {
-                // Uniformly slate all candidate cards with "BALLOT RECORDED"
-                // (no per-candidate green highlight to preserve true ballot secrecy)
-                voteButton.setEnabled(true);
-                voteButton.setText("BALLOT RECORDED");
-                voteButton.setBackgroundColor(Color.parseColor("#94A3B8")); // Neutral slate
-                voteButton.setTextColor(Color.WHITE);
-            } else {
-                // User hasn't voted yet. Keep buttons clickable and normal dark navy.
-                voteButton.setEnabled(true);
-                voteButton.setText("TAP TO VOTE");
-                voteButton.setBackgroundColor(Color.parseColor("#1E3A8A")); // Primary dark navy
-                voteButton.setTextColor(Color.WHITE);
+        holder.voteButton.setOnClickListener(v -> {
+            int currentPosition = holder.getAdapterPosition();
+            if (voteClickListener != null && currentPosition != RecyclerView.NO_POSITION) {
+                voteClickListener.onVoteClick(currentPosition);
             }
+        });
+    }
 
-            voteButton.setOnClickListener(v -> {
-                if (voteClickListener != null) {
-                    voteClickListener.onVoteClick(position);
-                }
-            });
+    public static class CandidateViewHolder extends RecyclerView.ViewHolder {
+        final TextView nameTextView;
+        final TextView partyTextView;
+        final ImageView avatarImageView;
+        final TextView voteButton;
+
+        public CandidateViewHolder(@NonNull View itemView) {
+            super(itemView);
+            nameTextView = itemView.findViewById(R.id.candidateNameText);
+            partyTextView = itemView.findViewById(R.id.candidatePartyText);
+            avatarImageView = itemView.findViewById(R.id.candidateAvatar);
+            voteButton = itemView.findViewById(R.id.voteButton);
         }
-
-        return convertView;
     }
 }

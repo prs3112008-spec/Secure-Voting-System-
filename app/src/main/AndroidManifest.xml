@@ -44,6 +44,9 @@
         <activity
             android:name=".RegisterActivity"
             android:exported="false" />
+        <activity
+            android:name=".ForgotPasswordActivity"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

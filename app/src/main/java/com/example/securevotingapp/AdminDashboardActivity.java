@@ -16,7 +16,6 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -27,30 +26,24 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.bumptech.glide.Glide;
+import com.example.securevotingapp.network.ApiClient;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-
-import com.android.volley.DefaultRetryPolicy;
-import com.android.volley.Request;
-import com.android.volley.RequestQueue;
-import com.android.volley.toolbox.JsonArrayRequest;
-import com.android.volley.toolbox.JsonObjectRequest;
-import com.android.volley.toolbox.StringRequest;
-import com.android.volley.toolbox.Volley;
-
-import org.json.JSONArray;
-import org.json.JSONException;
-import org.json.JSONObject;
-
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Map;
+
+import okhttp3.ResponseBody;
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
 
 public class AdminDashboardActivity extends AppCompatActivity {
 
     private static final String TAG = "AdminDashboardActivity";
-    private static final String BASE_URL = "https://secure-voting-system-9rnd.onrender.com";
 
     private static class PollItem {
         int pollId;
@@ -59,32 +52,69 @@ public class AdminDashboardActivity extends AppCompatActivity {
         boolean isActive;
         String status;
 
-        PollItem(int pollId, String title, String description, boolean isActive, String status) {
+        String startTimeIso;
+        String endTimeIso;
+
+        PollItem(int pollId, String title, String description, boolean isActive, String status, String startTimeIso, String endTimeIso) {
             this.pollId = pollId;
             this.title = title;
             this.description = description;
             this.isActive = isActive;
             this.status = status;
+            this.startTimeIso = startTimeIso;
+            this.endTimeIso = endTimeIso;
+        }
+
+        private static long parseIsoToMillis(String isoStr) {
+            if (isoStr == null || isoStr.isEmpty() || isoStr.equalsIgnoreCase("null")) return 0;
+            try {
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US);
+                sdf.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                java.util.Date date = sdf.parse(isoStr.length() >= 19 ? isoStr.substring(0, 19) : isoStr);
+                return (date != null) ? date.getTime() : 0;
+            } catch (Exception e) {
+                return 0;
+            }
         }
 
         @NonNull
         @Override
         public String toString() {
-            String label = "Poll #" + pollId + ": " + title;
-            if ("LIVE".equalsIgnoreCase(status) || isActive) {
-                label += " [LIVE]";
-            } else if ("CLOSED".equalsIgnoreCase(status)) {
-                label += " [CLOSED]";
-            } else if ("UPCOMING".equalsIgnoreCase(status)) {
-                label += " [UPCOMING]";
+            String badge;
+            long now = System.currentTimeMillis();
+            long startMs = parseIsoToMillis(startTimeIso);
+            long endMs = parseIsoToMillis(endTimeIso);
+
+            if (!isActive) {
+                badge = "[PAUSED]";
+            } else if (startMs > 0 && now < startMs) {
+                badge = "[UPCOMING]";
+            } else if (endMs > 0 && now > endMs) {
+                badge = "[ENDED]";
+            } else {
+                badge = "[LIVE]";
             }
-            return label;
+            return badge + " Poll #" + pollId + ": " + title;
         }
     }
 
+    private static class VoterItem {
+        int userId;
+        String email;
+        boolean isApproved;
+
+        VoterItem(int userId, String email, boolean isApproved) {
+            this.userId = userId;
+            this.email = email;
+            this.isApproved = isApproved;
+        }
+    }
+
+    private final ArrayList<VoterItem> allVotersList = new ArrayList<>();
+    private String currentVoterSearchQuery = "";
+    private String currentVoterFilterMode = "ALL";
+
     private final ArrayList<PollItem> pollList = new ArrayList<>();
-    private android.widget.ArrayAdapter<PollItem> pollSpinnerAdapter;
-    private Spinner adminPollSelectorSpinner;
     private Button createPollBtn;
     private String currentPollTitle = "Election";
 
@@ -106,10 +136,10 @@ public class AdminDashboardActivity extends AppCompatActivity {
                     try {
                         InputStream is = getContentResolver().openInputStream(uri);
                         Bitmap original = BitmapFactory.decodeStream(is);
-                        Bitmap scaled = Bitmap.createScaledBitmap(original, 150, 150, true);
+                        Bitmap scaled = Bitmap.createScaledBitmap(original, 400, 400, true);
 
                         ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                        scaled.compress(Bitmap.CompressFormat.JPEG, 60, baos);
+                        scaled.compress(Bitmap.CompressFormat.JPEG, 80, baos);
                         String base64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
                         selectedPhotoBase64 = "data:image/jpeg;base64," + base64;
 
@@ -129,10 +159,25 @@ public class AdminDashboardActivity extends AppCompatActivity {
     private String selectedStartIso = "";
     private String selectedEndIso = "";
 
+    private androidx.swiperefreshlayout.widget.SwipeRefreshLayout adminSwipeRefresh;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_admin_dashboard);
+
+        adminSwipeRefresh = findViewById(R.id.adminSwipeRefresh);
+        if (adminSwipeRefresh != null) {
+            adminSwipeRefresh.setOnRefreshListener(() -> {
+                fetchAdminPolls(0);
+                loadVoters();
+            });
+        }
+
+        com.google.android.material.appbar.AppBarLayout appBarLayout = findViewById(R.id.adminAppBarLayout);
+        if (appBarLayout != null && adminSwipeRefresh != null) {
+            appBarLayout.addOnOffsetChangedListener((appBar, verticalOffset) -> adminSwipeRefresh.setEnabled(verticalOffset == 0));
+        }
 
         tabElectionBtn = findViewById(R.id.tabElectionBtn);
         tabCandidatesBtn = findViewById(R.id.tabCandidatesBtn);
@@ -144,48 +189,12 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
         adminLogoutBtn = findViewById(R.id.adminLogoutBtn);
 
-        adminPollSelectorSpinner = findViewById(R.id.adminPollSelectorSpinner);
-        createPollBtn = findViewById(R.id.createPollBtn);
-
-        pollSpinnerAdapter = new android.widget.ArrayAdapter<PollItem>(this, android.R.layout.simple_spinner_item, pollList) {
-            @NonNull
-            @Override
-            public View getView(int position, View convertView, @NonNull ViewGroup parent) {
-                View view = super.getView(position, convertView, parent);
-                if (view instanceof TextView) {
-                    ((TextView) view).setTextColor(Color.WHITE);
-                    ((TextView) view).setTextSize(13);
-                }
-                return view;
-            }
-
-            @Override
-            public View getDropDownView(int position, View convertView, @NonNull ViewGroup parent) {
-                View view = super.getDropDownView(position, convertView, parent);
-                if (view instanceof TextView) {
-                    ((TextView) view).setTextColor(Color.parseColor("#0F172A"));
-                    ((TextView) view).setTextSize(13);
-                }
-                return view;
-            }
-        };
-        pollSpinnerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        if (adminPollSelectorSpinner != null) {
-            adminPollSelectorSpinner.setAdapter(pollSpinnerAdapter);
-            adminPollSelectorSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-                @Override
-                public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
-                    if (position >= 0 && position < pollList.size()) {
-                        PollItem selected = pollList.get(position);
-                        if (selected.pollId != currentPollId) {
-                            selectAdminPoll(selected);
-                        }
-                    }
-                }
-                @Override
-                public void onNothingSelected(android.widget.AdapterView<?> parent) {}
-            });
+        View adminPollSelectorCard = findViewById(R.id.adminPollSelectorCard);
+        if (adminPollSelectorCard != null) {
+            adminPollSelectorCard.setOnClickListener(v -> showPollSelectorBottomSheet());
         }
+
+        createPollBtn = findViewById(R.id.createPollBtn);
 
         if (createPollBtn != null) {
             createPollBtn.setOnClickListener(v -> showCreatePollDialog());
@@ -222,11 +231,14 @@ public class AdminDashboardActivity extends AppCompatActivity {
         pickEndTimeBtn = findViewById(R.id.pickEndTimeBtn);
         saveScheduleBtn = findViewById(R.id.saveScheduleBtn);
 
-        loadCurrentSchedule();
-
         if (pickStartTimeBtn != null) pickStartTimeBtn.setOnClickListener(v -> pickDateTime(true, pickStartTimeBtn));
         if (pickEndTimeBtn != null) pickEndTimeBtn.setOnClickListener(v -> pickDateTime(false, pickEndTimeBtn));
         if (saveScheduleBtn != null) saveScheduleBtn.setOnClickListener(v -> saveElectionSchedule());
+
+        Button quickStartPollBtn = findViewById(R.id.quickStartPollBtn);
+        if (quickStartPollBtn != null) {
+            quickStartPollBtn.setOnClickListener(v -> quickStartPollNow());
+        }
 
         Button verifyChainBtn = findViewById(R.id.verifyChainBtn);
         if (verifyChainBtn != null) {
@@ -258,38 +270,138 @@ public class AdminDashboardActivity extends AppCompatActivity {
             addCandidateToDatabase(newName);
         });
 
+        EditText voterSearchInput = findViewById(R.id.voterSearchInput);
+        if (voterSearchInput != null) {
+            voterSearchInput.addTextChangedListener(new android.text.TextWatcher() {
+                @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+                @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                    currentVoterSearchQuery = (s != null) ? s.toString().trim().toLowerCase(java.util.Locale.US) : "";
+                    filterAndRenderVoters();
+                }
+                @Override public void afterTextChanged(android.text.Editable s) {}
+            });
+        }
+
+        com.google.android.material.chip.ChipGroup voterFilterChipGroup = findViewById(R.id.voterFilterChipGroup);
+        if (voterFilterChipGroup != null) {
+            voterFilterChipGroup.setOnCheckedChangeListener((group, checkedId) -> {
+                if (checkedId == R.id.chipFilterPending) {
+                    currentVoterFilterMode = "PENDING";
+                } else if (checkedId == R.id.chipFilterApproved) {
+                    currentVoterFilterMode = "APPROVED";
+                } else {
+                    currentVoterFilterMode = "ALL";
+                }
+                filterAndRenderVoters();
+            });
+        }
+
         // Default tab on launch
         showTab("election");
 
         // Fetch polls list & load initial data
         fetchAdminPolls(0);
 
-        // Load all voters & candidates when Admin Dashboard opens
+        // Load all voters
         loadVoters();
     }
 
-    private void fetchAdminPolls(int autoSelectPollId) {
-        String url = BASE_URL + "/api/polls";
-        String token = getJwtToken();
+    private void showPollSelectorBottomSheet() {
+        com.google.android.material.bottomsheet.BottomSheetDialog bottomSheetDialog =
+                new com.google.android.material.bottomsheet.BottomSheetDialog(this);
 
-        JsonArrayRequest request = new JsonArrayRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(48, 36, 48, 36);
+        root.setBackgroundColor(Color.WHITE);
+
+        TextView title = new TextView(this);
+        title.setText("Select Election Poll");
+        title.setTextColor(Color.parseColor("#0F172A"));
+        title.setTextSize(18);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        title.setPadding(0, 0, 0, 24);
+        root.addView(title);
+
+        android.widget.ScrollView scrollView = new android.widget.ScrollView(this);
+        LinearLayout listContainer = new LinearLayout(this);
+        listContainer.setOrientation(LinearLayout.VERTICAL);
+
+        for (PollItem poll : pollList) {
+            com.google.android.material.card.MaterialCardView card = new com.google.android.material.card.MaterialCardView(this);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            params.setMargins(0, 0, 0, 16);
+            card.setLayoutParams(params);
+            card.setCardBackgroundColor(poll.pollId == currentPollId ? Color.parseColor("#F1F5F9") : Color.WHITE);
+            card.setRadius(20f);
+            card.setStrokeColor(poll.pollId == currentPollId ? Color.parseColor("#1E3A8A") : Color.parseColor("#E2E8F0"));
+            card.setStrokeWidth(poll.pollId == currentPollId ? 3 : 1);
+            card.setClickable(true);
+            card.setFocusable(true);
+
+            LinearLayout itemLayout = new LinearLayout(this);
+            itemLayout.setOrientation(LinearLayout.VERTICAL);
+            itemLayout.setPadding(24, 20, 24, 20);
+
+            TextView itemText = new TextView(this);
+            itemText.setText(poll.toString());
+            itemText.setTextColor(Color.parseColor("#0F172A"));
+            itemText.setTextSize(14);
+            itemText.setTypeface(null, android.graphics.Typeface.BOLD);
+
+            itemLayout.addView(itemText);
+
+            if (poll.description != null && !poll.description.isEmpty()) {
+                TextView descText = new TextView(this);
+                descText.setText(poll.description);
+                descText.setTextColor(Color.parseColor("#64748B"));
+                descText.setTextSize(12);
+                descText.setPadding(0, 4, 0, 0);
+                itemLayout.addView(descText);
+            }
+
+            card.addView(itemLayout);
+            card.setOnClickListener(v -> {
+                selectAdminPoll(poll);
+                bottomSheetDialog.dismiss();
+            });
+
+            listContainer.addView(card);
+        }
+
+        scrollView.addView(listContainer);
+        root.addView(scrollView);
+
+        bottomSheetDialog.setContentView(root);
+        bottomSheetDialog.show();
+    }
+
+    private void fetchAdminPolls(int autoSelectPollId) {
+        ApiClient.getApiService(this).getPolls().enqueue(new Callback<JsonArray>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonArray> call, @NonNull Response<JsonArray> response) {
+                if (adminSwipeRefresh != null) {
+                    adminSwipeRefresh.setRefreshing(false);
+                }
+                if (response.isSuccessful() && response.body() != null) {
                     try {
                         pollList.clear();
+                        JsonArray array = response.body();
                         int selectedIndex = 0;
 
-                        for (int i = 0; i < response.length(); i++) {
-                            JSONObject p = response.getJSONObject(i);
-                            int pollId = p.optInt("poll_id", p.optInt("id", 1));
-                            String title = p.optString("title", p.optString("poll_title", "Poll #" + pollId));
-                            String description = p.optString("description", "");
-                            boolean isActive = p.optBoolean("is_active", true);
-                            String status = p.optString("status", isActive ? "LIVE" : "CLOSED");
+                        for (int i = 0; i < array.size(); i++) {
+                            if (!array.get(i).isJsonObject()) continue;
+                            JsonObject p = array.get(i).getAsJsonObject();
+                            int pollId = p.has("poll_id") ? p.get("poll_id").getAsInt() : (p.has("id") ? p.get("id").getAsInt() : 1);
+                            String title = p.has("title") ? p.get("title").getAsString() : (p.has("poll_title") ? p.get("poll_title").getAsString() : "Poll #" + pollId);
+                            String description = p.has("description") ? p.get("description").getAsString() : "";
+                            boolean isActive = !p.has("is_active") || p.get("is_active").getAsBoolean();
+                            String status = p.has("status") ? p.get("status").getAsString() : (isActive ? "LIVE" : "CLOSED");
+                            String startTime = p.has("start_time") && !p.get("start_time").isJsonNull() ? p.get("start_time").getAsString() : "";
+                            String endTime = p.has("end_time") && !p.get("end_time").isJsonNull() ? p.get("end_time").getAsString() : "";
 
-                            PollItem item = new PollItem(pollId, title, description, isActive, status);
+                            PollItem item = new PollItem(pollId, title, description, isActive, status, startTime, endTime);
                             pollList.add(item);
 
                             if (autoSelectPollId > 0 && pollId == autoSelectPollId) {
@@ -299,33 +411,23 @@ public class AdminDashboardActivity extends AppCompatActivity {
                             }
                         }
 
-                        if (pollSpinnerAdapter != null) {
-                            pollSpinnerAdapter.notifyDataSetChanged();
-                        }
-
                         if (!pollList.isEmpty()) {
-                            if (adminPollSelectorSpinner != null) {
-                                adminPollSelectorSpinner.setSelection(selectedIndex);
-                            }
                             selectAdminPoll(pollList.get(selectedIndex));
                         }
-                    } catch (JSONException e) {
+                    } catch (Exception e) {
                         Log.e(TAG, "Error parsing admin polls response", e);
                     }
-                },
-                error -> Log.e(TAG, "Error fetching admin polls list", error)
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
                 }
-                return headers;
             }
-        };
 
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonArray> call, @NonNull Throwable t) {
+                if (adminSwipeRefresh != null) {
+                    adminSwipeRefresh.setRefreshing(false);
+                }
+                Log.e(TAG, "Error fetching admin polls list", t);
+            }
+        });
     }
 
     private void selectAdminPoll(PollItem poll) {
@@ -338,6 +440,32 @@ public class AdminDashboardActivity extends AppCompatActivity {
         if (activeStat != null) {
             activeStat.setText("Poll #" + currentPollId);
         }
+
+        TextView adminSelectedPollText = findViewById(R.id.adminSelectedPollText);
+        if (adminSelectedPollText != null) {
+            adminSelectedPollText.setText(poll.toString());
+        }
+
+        ApiClient.getApiService(this).getPollResults(currentPollId).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject obj = response.body();
+                    int totalVotes = 0;
+                    if (obj.has("turnout") && obj.get("turnout").isJsonObject()) {
+                        totalVotes = obj.getAsJsonObject("turnout").has("total_votes_cast")
+                                ? obj.getAsJsonObject("turnout").get("total_votes_cast").getAsInt() : 0;
+                    }
+                    TextView totalVotesStatText = findViewById(R.id.totalVotesStatText);
+                    if (totalVotesStatText != null) {
+                        totalVotesStatText.setText(totalVotes + (totalVotes == 1 ? " Vote" : " Votes"));
+                    }
+                }
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {}
+        });
 
         loadCurrentSchedule();
         loadAdminCandidates();
@@ -416,8 +544,9 @@ public class AdminDashboardActivity extends AppCompatActivity {
         new android.app.DatePickerDialog(this, (view, year, month, day) -> {
             new android.app.TimePickerDialog(this, (tView, hour, minute) -> {
                 cal.set(year, month, day, hour, minute, 0);
-                java.text.SimpleDateFormat isoFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.US);
-                java.text.SimpleDateFormat displayFormat = new java.text.SimpleDateFormat("dd MMM yyyy, hh:mm a", java.util.Locale.US);
+                java.text.SimpleDateFormat isoFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US);
+                isoFormat.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                java.text.SimpleDateFormat displayFormat = new java.text.SimpleDateFormat("dd MMM yyyy, hh:mm a", java.util.Locale.getDefault());
 
                 targetIsoHolder[0] = isoFormat.format(cal.getTime());
                 targetBtn.setText((isStart ? "Start: " : "End: ") + displayFormat.format(cal.getTime()));
@@ -426,52 +555,43 @@ public class AdminDashboardActivity extends AppCompatActivity {
     }
 
     private void createPollOnServer(String title, String description, String startTime, String endTime) {
-        String url = BASE_URL + "/api/polls/create";
-        String token = getJwtToken();
+        JsonObject body = new JsonObject();
+        body.addProperty("title", title);
+        if (!description.isEmpty()) body.addProperty("description", description);
+        if (!startTime.isEmpty()) body.addProperty("start_time", startTime);
+        if (!endTime.isEmpty()) body.addProperty("end_time", endTime);
 
-        JSONObject body = new JSONObject();
-        try {
-            body.put("title", title);
-            if (!description.isEmpty()) body.put("description", description);
-            if (!startTime.isEmpty()) body.put("start_time", startTime);
-            if (!endTime.isEmpty()) body.put("end_time", endTime);
-        } catch (JSONException e) {
-            Log.e(TAG, "Error building create poll JSON", e);
-        }
-
-        JsonObjectRequest req = new JsonObjectRequest(Request.Method.POST, url, body,
-                response -> {
-                    Toast.makeText(this, response.optString("message", "Poll created successfully!"), Toast.LENGTH_SHORT).show();
-                    JSONObject pollObj = response.optJSONObject("poll");
-                    int createdPollId = pollObj != null
-                            ? pollObj.optInt("poll_id", pollObj.optInt("id", -1))
-                            : response.optInt("poll_id", response.optInt("id", -1));
-                    fetchAdminPolls(createdPollId);
-                },
-                error -> {
-                    String errMessage = "Failed to create poll. Please try again.";
-                    if (error.networkResponse != null && error.networkResponse.data != null) {
-                        try {
-                            String errBody = new String(error.networkResponse.data, "UTF-8");
-                            JSONObject obj = new JSONObject(errBody);
-                            errMessage = obj.optString("error", obj.optString("message", errMessage));
-                        } catch (Exception ignored) {}
-                    }
-                    Toast.makeText(this, errMessage, Toast.LENGTH_LONG).show();
-                }
-        ) {
+        ApiClient.getApiService(this).createPoll(body).enqueue(new Callback<JsonObject>() {
             @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Content-Type", "application/json; charset=utf-8");
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
-            }
-        };
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
+                    String msg = respObj.has("message") ? respObj.get("message").getAsString() : "Poll created successfully!";
+                    Toast.makeText(AdminDashboardActivity.this, msg, Toast.LENGTH_SHORT).show();
 
-        Volley.newRequestQueue(this).add(req);
+                    int createdPollId = -1;
+                    if (respObj.has("poll") && respObj.get("poll").isJsonObject()) {
+                        JsonObject pollObj = respObj.getAsJsonObject("poll");
+                        if (pollObj.has("poll_id")) createdPollId = pollObj.get("poll_id").getAsInt();
+                        else if (pollObj.has("id")) createdPollId = pollObj.get("id").getAsInt();
+                    }
+                    if (createdPollId == -1) {
+                        if (respObj.has("poll_id")) createdPollId = respObj.get("poll_id").getAsInt();
+                        else if (respObj.has("id")) createdPollId = respObj.get("id").getAsInt();
+                    }
+
+                    fetchAdminPolls(createdPollId);
+                } else {
+                    String errMessage = ApiClient.parseErrorMessage(response, "Failed to create poll. Please try again.");
+                    Toast.makeText(AdminDashboardActivity.this, errMessage, Toast.LENGTH_LONG).show();
+                }
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Toast.makeText(AdminDashboardActivity.this, "Failed to create poll. Check connection.", Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     private void showTab(String tab) {
@@ -529,11 +649,6 @@ public class AdminDashboardActivity extends AppCompatActivity {
         }
     }
 
-    private String getJwtToken() {
-        SharedPreferences sharedPreferences = SecurePrefs.get(this);
-        return sharedPreferences.getString("jwt_token", null);
-    }
-
     private void addCandidateToDatabase(String candidateName) {
         if (selectedPhotoBase64 == null || selectedPhotoBase64.trim().isEmpty()) {
             Toast.makeText(AdminDashboardActivity.this, "Please select a candidate photo before adding.", Toast.LENGTH_SHORT).show();
@@ -544,147 +659,131 @@ public class AdminDashboardActivity extends AppCompatActivity {
             return;
         }
 
-        String url = BASE_URL + "/api/candidates/add";
-        String token = getJwtToken();
         String party = (candidatePartyInput != null) ? candidatePartyInput.getText().toString().trim() : "";
 
-        JSONObject jsonBody = new JSONObject();
-        try {
-            jsonBody.put("poll_id", currentPollId);
-            jsonBody.put("candidate_name", candidateName);
-            jsonBody.put("party", party.isEmpty() ? "Independent" : party);
-            jsonBody.put("photo_url", selectedPhotoBase64);
-        } catch (JSONException e) {
-            Log.e(TAG, "Error building JSON request body", e);
-        }
+        JsonObject jsonBody = new JsonObject();
+        jsonBody.addProperty("poll_id", currentPollId);
+        jsonBody.addProperty("candidate_name", candidateName);
+        jsonBody.addProperty("party", party.isEmpty() ? "Independent" : party);
+        jsonBody.addProperty("photo_url", selectedPhotoBase64);
 
-        final String requestBodyString = jsonBody.toString();
+        ApiClient.getApiService(this).addCandidate(jsonBody).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (addCandidateButton != null) {
+                    addCandidateButton.setEnabled(true);
+                    addCandidateButton.setText("ADD CANDIDATE");
+                }
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
+                    String msg = respObj.has("message") ? respObj.get("message").getAsString() : "Candidate added successfully!";
+                    Toast.makeText(AdminDashboardActivity.this, msg, Toast.LENGTH_LONG).show();
 
-        StringRequest stringRequest = new StringRequest(
-                Request.Method.POST,
-                url,
-                response -> {
-                    try {
-                        String msg = "Candidate added successfully!";
-                        if (response != null && !response.trim().isEmpty()) {
-                            try {
-                                JSONObject respObj = new JSONObject(response.trim());
-                                if (respObj.has("message")) {
-                                    msg = respObj.getString("message");
-                                }
-                            } catch (JSONException ignored) {}
-                        }
-                        Toast.makeText(AdminDashboardActivity.this, msg, Toast.LENGTH_LONG).show();
-                        if (candidateNameInput != null) candidateNameInput.setText("");
-                        if (candidatePartyInput != null) candidatePartyInput.setText("");
-                        selectedPhotoBase64 = "";
-                        if (candidatePhotoPreview != null) {
-                            candidatePhotoPreview.setImageResource(android.R.drawable.ic_menu_myplaces);
-                        }
-                        if (addCandidateButton != null) {
-                            addCandidateButton.setEnabled(true);
-                            addCandidateButton.setText("ADD CANDIDATE");
-                        }
-                        loadAdminCandidates();
-                    } catch (Exception e) {
-                        Log.e(TAG, "Error processing add candidate response", e);
-                        if (addCandidateButton != null) {
-                            addCandidateButton.setEnabled(true);
-                            addCandidateButton.setText("ADD CANDIDATE");
-                        }
+                    if (candidateNameInput != null) candidateNameInput.setText("");
+                    if (candidatePartyInput != null) candidatePartyInput.setText("");
+                    selectedPhotoBase64 = "";
+                    if (candidatePhotoPreview != null) {
+                        candidatePhotoPreview.setImageResource(android.R.drawable.ic_menu_myplaces);
                     }
-                },
-                error -> {
-                    if (addCandidateButton != null) {
-                        addCandidateButton.setEnabled(true);
-                        addCandidateButton.setText("ADD CANDIDATE");
-                    }
-                    String errorMessage = "Failed to add candidate. Please try again.";
-                    if (error.networkResponse != null && error.networkResponse.data != null) {
-                        try {
-                            String body = new String(error.networkResponse.data, "UTF-8");
-                            JSONObject errObj = new JSONObject(body);
-                            String serverMsg = errObj.optString("error", errObj.optString("message", ""));
-                            if (!serverMsg.isEmpty()) {
-                                errorMessage = serverMsg;
-                            }
-                        } catch (Exception ignored) {}
-                    }
+                    loadAdminCandidates();
+                } else {
+                    String errorMessage = ApiClient.parseErrorMessage(response, "Failed to add candidate. Please try again.");
                     Toast.makeText(AdminDashboardActivity.this, errorMessage, Toast.LENGTH_LONG).show();
                 }
-        ) {
-            @Override
-            public String getBodyContentType() {
-                return "application/json; charset=utf-8";
             }
 
             @Override
-            public byte[] getBody() {
-                try {
-                    return requestBodyString.getBytes("utf-8");
-                } catch (Exception e) {
-                    return null;
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                if (addCandidateButton != null) {
+                    addCandidateButton.setEnabled(true);
+                    addCandidateButton.setText("ADD CANDIDATE");
                 }
+                Toast.makeText(AdminDashboardActivity.this, "Failed to add candidate. Check connection.", Toast.LENGTH_LONG).show();
             }
-
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
-            }
-        };
-
-        RequestQueue queue = Volley.newRequestQueue(this);
-        queue.add(stringRequest);
+        });
     }
 
     private void loadVoters() {
-        String url = BASE_URL + "/api/admin/voters";
-        String token = getJwtToken();
-
-        JsonArrayRequest request = new JsonArrayRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
-                    votersContainer.removeAllViews();
-                    try {
-                        if (response == null || response.length() == 0) {
-                            TextView empty = new TextView(this);
-                            empty.setText("No voters registered yet.");
-                            empty.setTextColor(Color.parseColor("#64748B"));
-                            empty.setTextSize(14);
-                            empty.setPadding(16, 24, 16, 24);
-                            empty.setGravity(Gravity.CENTER);
-                            votersContainer.addView(empty);
-                            return;
-                        }
-                        for (int i = 0; i < response.length(); i++) {
-                            JSONObject voter = response.getJSONObject(i);
-                            int userId = voter.getInt("user_id");
-                            String email = voter.optString("email", "Unknown");
-                            boolean isApproved = voter.optBoolean("is_approved", false);
-
-                            addVoterRow(userId, email, isApproved);
-                        }
-                    } catch (JSONException e) {
-                        Log.e(TAG, "Error parsing voters list", e);
-                    }
-                },
-                error -> Toast.makeText(this, "Failed to load voters", Toast.LENGTH_SHORT).show()
-        ) {
+        ApiClient.getApiService(this).getVoters().enqueue(new Callback<JsonArray>() {
             @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Authorization", "Bearer " + token);
-                return headers;
-            }
-        };
+            public void onResponse(@NonNull Call<JsonArray> call, @NonNull Response<JsonArray> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    allVotersList.clear();
+                    JsonArray array = response.body();
+                    int unapprovedCount = 0;
+                    for (int i = 0; i < array.size(); i++) {
+                        if (!array.get(i).isJsonObject()) continue;
+                        JsonObject voter = array.get(i).getAsJsonObject();
+                        int userId = voter.has("user_id") ? voter.get("user_id").getAsInt() : 0;
+                        String email = voter.has("email") ? voter.get("email").getAsString() : "Unknown";
+                        boolean isApproved = voter.has("is_approved") && voter.get("is_approved").getAsBoolean();
 
-        Volley.newRequestQueue(this).add(request);
+                        if (!isApproved) unapprovedCount++;
+                        allVotersList.add(new VoterItem(userId, email, isApproved));
+                    }
+
+                    TextView pendingStat = findViewById(R.id.pendingVotersStatText);
+                    if (pendingStat != null) {
+                        pendingStat.setText(unapprovedCount + " Pending");
+                    }
+
+                    filterAndRenderVoters();
+                } else {
+                    Toast.makeText(AdminDashboardActivity.this, "Failed to load voters", Toast.LENGTH_SHORT).show();
+                }
+            }
+
+            @Override
+            public void onFailure(@NonNull Call<JsonArray> call, @NonNull Throwable t) {
+                Toast.makeText(AdminDashboardActivity.this, "Failed to load voters", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    private void filterAndRenderVoters() {
+        if (votersContainer == null) return;
+        votersContainer.removeAllViews();
+
+        if (allVotersList.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("No voters registered yet.");
+            empty.setTextColor(Color.parseColor("#64748B"));
+            empty.setTextSize(14);
+            empty.setPadding(16, 24, 16, 24);
+            empty.setGravity(Gravity.CENTER);
+            votersContainer.addView(empty);
+            return;
+        }
+
+        int renderedCount = 0;
+        for (VoterItem voter : allVotersList) {
+            boolean matchesFilter = true;
+            if ("PENDING".equalsIgnoreCase(currentVoterFilterMode) && voter.isApproved) {
+                matchesFilter = false;
+            } else if ("APPROVED".equalsIgnoreCase(currentVoterFilterMode) && !voter.isApproved) {
+                matchesFilter = false;
+            }
+
+            boolean matchesSearch = true;
+            if (!currentVoterSearchQuery.isEmpty()) {
+                matchesSearch = voter.email != null && voter.email.toLowerCase(java.util.Locale.US).contains(currentVoterSearchQuery);
+            }
+
+            if (matchesFilter && matchesSearch) {
+                addVoterRow(voter.userId, voter.email, voter.isApproved);
+                renderedCount++;
+            }
+        }
+
+        if (renderedCount == 0) {
+            TextView noMatches = new TextView(this);
+            noMatches.setText("No matching voters found.");
+            noMatches.setTextColor(Color.parseColor("#64748B"));
+            noMatches.setTextSize(14);
+            noMatches.setPadding(16, 24, 16, 24);
+            noMatches.setGravity(Gravity.CENTER);
+            votersContainer.addView(noMatches);
+        }
     }
 
     private void addVoterRow(int userId, String email, boolean isApproved) {
@@ -718,11 +817,26 @@ public class AdminDashboardActivity extends AppCompatActivity {
         textLayout.addView(emailText);
         textLayout.addView(statusText);
 
-        com.google.android.material.button.MaterialButton actionButton = new com.google.android.material.button.MaterialButton(this);
-        actionButton.setText(isApproved ? "Revoke" : "Approve");
-        actionButton.setBackgroundColor(isApproved ? Color.parseColor("#DC2626") : Color.parseColor("#059669"));
-        actionButton.setTextColor(Color.WHITE);
-        actionButton.setCornerRadius(16);
+        com.google.android.material.button.MaterialButton actionButton;
+        int padH = (int) (14 * getResources().getDisplayMetrics().density);
+        int minW = (int) (84 * getResources().getDisplayMetrics().density);
+
+        if (!isApproved) {
+            actionButton = new com.google.android.material.button.MaterialButton(this);
+            actionButton.setText("Approve");
+            actionButton.setBackgroundColor(Color.parseColor("#059669"));
+            actionButton.setTextColor(Color.WHITE);
+        } else {
+            actionButton = new com.google.android.material.button.MaterialButton(this, null, com.google.android.material.R.style.Widget_MaterialComponents_Button_OutlinedButton);
+            actionButton.setText("Revoke");
+            actionButton.setBackgroundColor(Color.WHITE);
+            actionButton.setStrokeColor(android.content.res.ColorStateList.valueOf(Color.parseColor("#DC2626")));
+            actionButton.setStrokeWidth((int) (1.5f * getResources().getDisplayMetrics().density));
+            actionButton.setTextColor(Color.parseColor("#DC2626"));
+        }
+        actionButton.setPadding(padH, actionButton.getPaddingTop(), padH, actionButton.getPaddingBottom());
+        actionButton.setMinimumWidth(minW);
+        actionButton.setCornerRadius((int) (16 * getResources().getDisplayMetrics().density));
 
         actionButton.setOnClickListener(v -> confirmUpdateVoterApproval(userId, !isApproved, actionButton, email));
 
@@ -756,79 +870,92 @@ public class AdminDashboardActivity extends AppCompatActivity {
             actionButton.setEnabled(false);
             actionButton.setText("UPDATING...");
         }
-        String url = BASE_URL + "/api/admin/voters/" + userId + "/approve";
-        String token = getJwtToken();
 
-        JSONObject body = new JSONObject();
-        try {
-            body.put("is_approved", approve);
-        } catch (JSONException e) {
-            Log.e(TAG, "Error building approval body", e);
-        }
+        JsonObject body = new JsonObject();
+        body.addProperty("is_approved", approve);
 
-        JsonObjectRequest request = new JsonObjectRequest(
-                Request.Method.PUT,
-                url,
-                body,
-                response -> {
-                    Toast.makeText(this, approve ? "Voter Approved!" : "Approval Revoked", Toast.LENGTH_SHORT).show();
-                    loadVoters(); // Refresh the list immediately
-                },
-                error -> {
+        ApiClient.getApiService(this).approveVoter(userId, body).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful()) {
+                    Toast.makeText(AdminDashboardActivity.this, approve ? "Voter Approved!" : "Approval Revoked", Toast.LENGTH_SHORT).show();
+                    loadVoters();
+                } else {
                     if (actionButton != null) {
                         actionButton.setEnabled(true);
                         actionButton.setText(approve ? "Revoke" : "Approve");
                     }
-                    String errMessage = "Failed to update approval";
-                    if (error.networkResponse != null && error.networkResponse.statusCode == 429) {
-                        errMessage = "Too many attempts. Please wait a few minutes and try again.";
-                    }
-                    Toast.makeText(this, errMessage, Toast.LENGTH_SHORT).show();
+                    String errMessage = ApiClient.parseErrorMessage(response, "Failed to update approval");
+                    Toast.makeText(AdminDashboardActivity.this, errMessage, Toast.LENGTH_SHORT).show();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                headers.put("Content-Type", "application/json; charset=utf-8");
-                headers.put("Authorization", "Bearer " + token);
-                return headers;
             }
+
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                if (actionButton != null) {
+                    actionButton.setEnabled(true);
+                    actionButton.setText(approve ? "Revoke" : "Approve");
+                }
+                Toast.makeText(AdminDashboardActivity.this, "Failed to update approval", Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    private String formatScheduleLocalDisplay(String isoStr) {
+        if (isoStr == null || isoStr.isEmpty() || isoStr.equalsIgnoreCase("null")) return "";
+        String[] formats = {
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                "yyyy-MM-dd'T'HH:mm:ssXXX",
+                "yyyy-MM-dd'T'HH:mm:ss.SSS",
+                "yyyy-MM-dd'T'HH:mm:ss",
+                "yyyy-MM-dd HH:mm:ss"
         };
 
-        Volley.newRequestQueue(this).add(request);
+        for (String pattern : formats) {
+            try {
+                java.text.SimpleDateFormat parseFormat = new java.text.SimpleDateFormat(pattern, java.util.Locale.US);
+                parseFormat.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                java.util.Date date = parseFormat.parse(isoStr);
+                if (date != null) {
+                    java.text.SimpleDateFormat displayFormat = new java.text.SimpleDateFormat("dd MMM yyyy, hh:mm a", java.util.Locale.getDefault());
+                    displayFormat.setTimeZone(java.util.TimeZone.getDefault());
+                    return displayFormat.format(date);
+                }
+            } catch (Exception ignored) {}
+        }
+        return isoStr;
     }
 
     private void loadCurrentSchedule() {
-        String url = BASE_URL + "/api/votes/election-status/" + currentPollId;
-        String token = getJwtToken();
-
-        JsonObjectRequest req = new JsonObjectRequest(Request.Method.GET, url, null,
-                response -> {
+        ApiClient.getApiService(this).getElectionStatus(currentPollId).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
                     if (electionActiveSwitch != null) {
-                        electionActiveSwitch.setChecked(response.optBoolean("is_active", true));
+                        electionActiveSwitch.setChecked(!respObj.has("is_active") || respObj.get("is_active").getAsBoolean());
                     }
-                    selectedStartIso = response.optString("start_time", "");
-                    selectedEndIso = response.optString("end_time", "");
+                    selectedStartIso = respObj.has("start_time") ? respObj.get("start_time").getAsString() : "";
+                    selectedEndIso = respObj.has("end_time") ? respObj.get("end_time").getAsString() : "";
+
                     if (!selectedStartIso.isEmpty() && pickStartTimeBtn != null) {
-                        pickStartTimeBtn.setText("Start: " + (selectedStartIso.length() >= 16 ? selectedStartIso.substring(0, 16).replace("T", " ") : selectedStartIso));
+                        String formattedStart = formatScheduleLocalDisplay(selectedStartIso);
+                        pickStartTimeBtn.setText("Start: " + (formattedStart.isEmpty() ? selectedStartIso : formattedStart));
                     }
                     if (!selectedEndIso.isEmpty() && pickEndTimeBtn != null) {
-                        pickEndTimeBtn.setText("End: " + (selectedEndIso.length() >= 16 ? selectedEndIso.substring(0, 16).replace("T", " ") : selectedEndIso));
+                        String formattedEnd = formatScheduleLocalDisplay(selectedEndIso);
+                        pickEndTimeBtn.setText("End: " + (formattedEnd.isEmpty() ? selectedEndIso : formattedEnd));
                     }
-                },
-                error -> Toast.makeText(this, "Could not load current schedule", Toast.LENGTH_SHORT).show()
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
                 }
-                return headers;
             }
-        };
 
-        Volley.newRequestQueue(this).add(req);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Toast.makeText(AdminDashboardActivity.this, "Could not load current schedule", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void pickDateTime(boolean isStart, Button targetBtn) {
@@ -836,7 +963,8 @@ public class AdminDashboardActivity extends AppCompatActivity {
         new android.app.DatePickerDialog(this, (view, year, month, day) -> {
             new android.app.TimePickerDialog(this, (tView, hour, minute) -> {
                 cal.set(year, month, day, hour, minute, 0);
-                java.text.SimpleDateFormat isoFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", java.util.Locale.getDefault());
+                java.text.SimpleDateFormat isoFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US);
+                isoFormat.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
                 java.text.SimpleDateFormat displayFormat = new java.text.SimpleDateFormat("dd MMM yyyy, hh:mm a", java.util.Locale.getDefault());
 
                 if (isStart) {
@@ -850,38 +978,49 @@ public class AdminDashboardActivity extends AppCompatActivity {
         }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH)).show();
     }
 
-    private void saveElectionSchedule() {
-        String url = BASE_URL + "/api/votes/update-schedule";
-        String token = getJwtToken();
+    private void quickStartPollNow() {
+        java.util.Calendar calNow = java.util.Calendar.getInstance();
+        java.util.Calendar cal24h = java.util.Calendar.getInstance();
+        cal24h.add(java.util.Calendar.DAY_OF_YEAR, 1);
 
-        try {
-            JSONObject body = new JSONObject();
-            body.put("poll_id", currentPollId);
-            body.put("start_time", selectedStartIso);
-            body.put("end_time", selectedEndIso);
-            if (electionActiveSwitch != null) {
-                body.put("is_active", electionActiveSwitch.isChecked());
+        java.text.SimpleDateFormat isoFormat = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US);
+        isoFormat.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+
+        selectedStartIso = isoFormat.format(calNow.getTime());
+        selectedEndIso = isoFormat.format(cal24h.getTime());
+
+        if (electionActiveSwitch != null) {
+            electionActiveSwitch.setChecked(true);
+        }
+
+        saveElectionSchedule();
+    }
+
+    private void saveElectionSchedule() {
+        JsonObject body = new JsonObject();
+        body.addProperty("poll_id", currentPollId);
+        body.addProperty("start_time", selectedStartIso);
+        body.addProperty("end_time", selectedEndIso);
+        if (electionActiveSwitch != null) {
+            body.addProperty("is_active", electionActiveSwitch.isChecked());
+        }
+
+        ApiClient.getApiService(this).updateSchedule(body).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    String msg = response.body().has("message") ? response.body().get("message").getAsString() : "Schedule saved!";
+                    Toast.makeText(AdminDashboardActivity.this, msg, Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(AdminDashboardActivity.this, "Failed to save schedule", Toast.LENGTH_SHORT).show();
+                }
             }
 
-            JsonObjectRequest req = new JsonObjectRequest(Request.Method.POST, url, body,
-                    response -> Toast.makeText(this, response.optString("message", "Schedule saved!"), Toast.LENGTH_SHORT).show(),
-                    error -> Toast.makeText(this, "Failed to save schedule", Toast.LENGTH_SHORT).show()
-            ) {
-                @Override
-                public Map<String, String> getHeaders() {
-                    Map<String, String> headers = new HashMap<>();
-                    headers.put("Content-Type", "application/json; charset=utf-8");
-                    if (token != null) {
-                        headers.put("Authorization", "Bearer " + token);
-                    }
-                    return headers;
-                }
-            };
-
-            Volley.newRequestQueue(this).add(req);
-        } catch (Exception e) {
-            Log.e(TAG, "Error saving schedule", e);
-        }
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Toast.makeText(AdminDashboardActivity.this, "Failed to save schedule", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void confirmDeleteCandidate(int candidateId, Button deleteBtn, String candidateName) {
@@ -908,65 +1047,50 @@ public class AdminDashboardActivity extends AppCompatActivity {
             deleteBtn.setEnabled(false);
             deleteBtn.setText("DELETING...");
         }
-        String url = BASE_URL + "/api/candidates/" + candidateId;
-        String token = getJwtToken();
 
-        StringRequest request = new StringRequest(
-                Request.Method.DELETE, url,
-                response -> {
-                    Toast.makeText(this, "Candidate deleted!", Toast.LENGTH_SHORT).show();
-                    loadAdminCandidates(); // Refresh list immediately
-                },
-                error -> {
+        ApiClient.getApiService(this).deleteCandidate(candidateId).enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful()) {
+                    Toast.makeText(AdminDashboardActivity.this, "Candidate deleted!", Toast.LENGTH_SHORT).show();
+                    loadAdminCandidates();
+                } else {
                     if (deleteBtn != null) {
                         deleteBtn.setEnabled(true);
                         deleteBtn.setText("DELETE");
                     }
-                    String errMessage = "Failed to delete candidate";
-                    if (error.networkResponse != null && error.networkResponse.statusCode == 429) {
-                        errMessage = "Too many attempts. Please wait a few minutes and try again.";
-                    }
-                    Toast.makeText(this, errMessage, Toast.LENGTH_SHORT).show();
+                    String errMessage = ApiClient.parseErrorMessage(response, "Failed to delete candidate");
+                    Toast.makeText(AdminDashboardActivity.this, errMessage, Toast.LENGTH_SHORT).show();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
             }
-        };
 
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                if (deleteBtn != null) {
+                    deleteBtn.setEnabled(true);
+                    deleteBtn.setText("DELETE");
+                }
+                Toast.makeText(AdminDashboardActivity.this, "Failed to delete candidate", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void loadAdminCandidates() {
-        String url = BASE_URL + "/api/candidates/" + currentPollId;
         LinearLayout candidatesContainer = findViewById(R.id.candidatesContainer);
         if (candidatesContainer == null) return;
 
         candidatesContainer.setVisibility(View.VISIBLE);
-        String token = getJwtToken();
 
-        StringRequest request = new StringRequest(
-                Request.Method.GET, url,
-                response -> {
-                    candidatesContainer.removeAllViews();
+        ApiClient.getApiService(this).getCandidates(currentPollId).enqueue(new Callback<JsonArray>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonArray> call, @NonNull Response<JsonArray> response) {
+                candidatesContainer.removeAllViews();
+                if (response.isSuccessful() && response.body() != null) {
                     try {
-                        JSONArray array = null;
-                        String trimmed = response != null ? response.trim() : "";
-                        if (trimmed.startsWith("[")) {
-                            array = new JSONArray(trimmed);
-                        } else if (trimmed.startsWith("{")) {
-                            JSONObject obj = new JSONObject(trimmed);
-                            array = obj.optJSONArray("candidates");
-                            if (array == null) array = obj.optJSONArray("data");
-                        }
+                        JsonArray array = response.body();
 
-                        if (array == null || array.length() == 0) {
-                            TextView empty = new TextView(this);
+                        if (array.size() == 0) {
+                            TextView empty = new TextView(AdminDashboardActivity.this);
                             empty.setText("No candidates added yet.");
                             empty.setTextColor(Color.parseColor("#64748B"));
                             empty.setTextSize(14);
@@ -976,14 +1100,16 @@ public class AdminDashboardActivity extends AppCompatActivity {
                             return;
                         }
 
-                        for (int i = 0; i < array.length(); i++) {
-                            JSONObject c = array.getJSONObject(i);
-                            int candidateId = c.optInt("candidate_id", c.optInt("id"));
-                            String name = c.optString("candidate_name", c.optString("name", "Unknown"));
-                            String party = c.optString("party", c.optString("party_name", "Independent"));
-                            String photoUrl = c.optString("photo_url", c.optString("image_url", ""));
+                        for (int i = 0; i < array.size(); i++) {
+                            if (!array.get(i).isJsonObject()) continue;
+                            JsonObject c = array.get(i).getAsJsonObject();
 
-                            com.google.android.material.card.MaterialCardView card = new com.google.android.material.card.MaterialCardView(this);
+                            int candidateId = c.has("candidate_id") ? c.get("candidate_id").getAsInt() : (c.has("id") ? c.get("id").getAsInt() : 0);
+                            String name = c.has("candidate_name") ? c.get("candidate_name").getAsString() : (c.has("name") ? c.get("name").getAsString() : "Unknown");
+                            String party = c.has("party") ? c.get("party").getAsString() : (c.has("party_name") ? c.get("party_name").getAsString() : "Independent");
+                            String photoUrl = c.has("photo_url") ? c.get("photo_url").getAsString() : (c.has("image_url") ? c.get("image_url").getAsString() : "");
+
+                            com.google.android.material.card.MaterialCardView card = new com.google.android.material.card.MaterialCardView(AdminDashboardActivity.this);
                             LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                                     LinearLayout.LayoutParams.MATCH_PARENT,
                                     LinearLayout.LayoutParams.WRAP_CONTENT
@@ -991,41 +1117,41 @@ public class AdminDashboardActivity extends AppCompatActivity {
                             cardParams.setMargins(0, 0, 0, 16);
                             card.setLayoutParams(cardParams);
                             card.setCardBackgroundColor(Color.WHITE);
-                            card.setRadius(24f); // 12dp equivalent
+                            card.setRadius(24f);
                             card.setStrokeColor(Color.parseColor("#E2E8F0"));
                             card.setStrokeWidth(2);
                             card.setCardElevation(0f);
 
-                            LinearLayout row = new LinearLayout(this);
+                            LinearLayout row = new LinearLayout(AdminDashboardActivity.this);
                             row.setOrientation(LinearLayout.HORIZONTAL);
                             row.setPadding(24, 20, 24, 20);
                             row.setGravity(Gravity.CENTER_VERTICAL);
 
-                            ImageView avatarImageView = new ImageView(this);
+                            ImageView avatarImageView = new ImageView(AdminDashboardActivity.this);
                             LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(96, 96);
                             avatarParams.setMargins(0, 0, 20, 0);
                             avatarImageView.setLayoutParams(avatarParams);
 
-                            Glide.with(this)
+                            Glide.with(AdminDashboardActivity.this)
                                     .load(photoUrl)
                                     .circleCrop()
                                     .placeholder(android.R.drawable.ic_menu_myplaces)
                                     .error(android.R.drawable.ic_menu_myplaces)
                                     .into(avatarImageView);
 
-                            LinearLayout textLayout = new LinearLayout(this);
+                            LinearLayout textLayout = new LinearLayout(AdminDashboardActivity.this);
                             textLayout.setOrientation(LinearLayout.VERTICAL);
                             LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
                             textParams.setMarginEnd(24);
                             textLayout.setLayoutParams(textParams);
 
-                            TextView nameText = new TextView(this);
+                            TextView nameText = new TextView(AdminDashboardActivity.this);
                             nameText.setText(name);
                             nameText.setTextColor(Color.parseColor("#1E293B"));
                             nameText.setTextSize(15);
                             nameText.setTypeface(null, android.graphics.Typeface.BOLD);
 
-                            TextView partyText = new TextView(this);
+                            TextView partyText = new TextView(AdminDashboardActivity.this);
                             partyText.setText(party);
                             partyText.setTextColor(Color.parseColor("#475569"));
                             partyText.setTextSize(13);
@@ -1033,11 +1159,17 @@ public class AdminDashboardActivity extends AppCompatActivity {
                             textLayout.addView(nameText);
                             textLayout.addView(partyText);
 
-                            com.google.android.material.button.MaterialButton deleteBtn = new com.google.android.material.button.MaterialButton(this);
+                            com.google.android.material.button.MaterialButton deleteBtn =
+                                    new com.google.android.material.button.MaterialButton(AdminDashboardActivity.this, null, com.google.android.material.R.style.Widget_MaterialComponents_Button_OutlinedButton);
                             deleteBtn.setText("DELETE");
-                            deleteBtn.setTextColor(Color.WHITE);
-                            deleteBtn.setBackgroundColor(Color.parseColor("#DC2626"));
-                            deleteBtn.setCornerRadius(16);
+                            deleteBtn.setTextColor(Color.parseColor("#DC2626"));
+                            deleteBtn.setBackgroundColor(Color.WHITE);
+                            deleteBtn.setStrokeColor(android.content.res.ColorStateList.valueOf(Color.parseColor("#DC2626")));
+                            deleteBtn.setStrokeWidth((int) (1.5f * getResources().getDisplayMetrics().density));
+                            int candPadH = (int) (14 * getResources().getDisplayMetrics().density);
+                            deleteBtn.setPadding(candPadH, deleteBtn.getPaddingTop(), candPadH, deleteBtn.getPaddingBottom());
+                            deleteBtn.setMinimumWidth((int) (84 * getResources().getDisplayMetrics().density));
+                            deleteBtn.setCornerRadius((int) (16 * getResources().getDisplayMetrics().density));
                             deleteBtn.setOnClickListener(v -> confirmDeleteCandidate(candidateId, deleteBtn, name));
 
                             row.addView(avatarImageView);
@@ -1048,112 +1180,88 @@ public class AdminDashboardActivity extends AppCompatActivity {
                         }
                     } catch (Exception e) {
                         Log.e(TAG, "Parsing candidates failed", e);
-                        Toast.makeText(this, "Failed to load candidates. Please try again.", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(AdminDashboardActivity.this, "Failed to load candidates. Please try again.", Toast.LENGTH_SHORT).show();
                     }
-                },
-                error -> {
-                    Log.e(TAG, "Fetching candidates failed", error);
-                    Toast.makeText(this, "Failed to load candidates. Check connection.", Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(AdminDashboardActivity.this, "Failed to load candidates. Check connection.", Toast.LENGTH_SHORT).show();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
             }
-        };
 
-        request.setShouldCache(false);
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonArray> call, @NonNull Throwable t) {
+                Toast.makeText(AdminDashboardActivity.this, "Failed to load candidates. Check connection.", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void verifyChainIntegrity() {
-        String url = BASE_URL + "/api/votes/verify-chain";
-        String token = getJwtToken();
+        ApiClient.getApiService(this).verifyChainIntegrity().enqueue(new Callback<JsonObject>() {
+            @Override
+            public void onResponse(@NonNull Call<JsonObject> call, @NonNull Response<JsonObject> response) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JsonObject respObj = response.body();
+                    boolean isValid = respObj.has("valid") && respObj.get("valid").getAsBoolean();
+                    String message = respObj.has("message") ? respObj.get("message").getAsString() : "Verification complete.";
 
-        JsonObjectRequest request = new JsonObjectRequest(
-                Request.Method.GET,
-                url,
-                null,
-                response -> {
-                    boolean isValid = response.optBoolean("valid", false);
-                    String message = response.optString("message", "Verification complete.");
-
-                    new AlertDialog.Builder(this)
+                    new AlertDialog.Builder(AdminDashboardActivity.this)
                             .setTitle(isValid ? "Chain Integrity Verified" : "Tampering Detected!")
                             .setMessage(message)
                             .setPositiveButton("OK", (dialog, which) -> dialog.dismiss())
                             .show();
-                },
-                error -> Toast.makeText(this, "Error connecting to verification server", Toast.LENGTH_SHORT).show()
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
+                } else {
+                    Toast.makeText(AdminDashboardActivity.this, "Error connecting to verification server", Toast.LENGTH_SHORT).show();
                 }
-                return headers;
             }
-        };
 
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<JsonObject> call, @NonNull Throwable t) {
+                Toast.makeText(AdminDashboardActivity.this, "Error connecting to verification server", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void fetchAuditLogs() {
-        String url = BASE_URL + "/api/admin/audit-logs";
-        String token = getJwtToken();
-
-        StringRequest request = new StringRequest(
-                Request.Method.GET,
-                url,
-                response -> {
+        ApiClient.getApiService(this).getAuditLogs().enqueue(new Callback<com.google.gson.JsonElement>() {
+            @Override
+            public void onResponse(@NonNull Call<com.google.gson.JsonElement> call, @NonNull Response<com.google.gson.JsonElement> response) {
+                if (response.isSuccessful() && response.body() != null) {
                     try {
-                        JSONArray array = null;
-                        String trimmed = response != null ? response.trim() : "";
-                        if (trimmed.startsWith("[")) {
-                            array = new JSONArray(trimmed);
-                        } else if (trimmed.startsWith("{")) {
-                            JSONObject obj = new JSONObject(trimmed);
-                            array = obj.optJSONArray("logs");
-                            if (array == null) array = obj.optJSONArray("audit_logs");
-                            if (array == null) array = obj.optJSONArray("data");
+                        com.google.gson.JsonElement element = response.body();
+                        JsonArray array = null;
+
+                        if (element.isJsonArray()) {
+                            array = element.getAsJsonArray();
+                        } else if (element.isJsonObject()) {
+                            JsonObject obj = element.getAsJsonObject();
+                            if (obj.has("logs") && obj.get("logs").isJsonArray()) {
+                                array = obj.getAsJsonArray("logs");
+                            } else if (obj.has("audit_logs") && obj.get("audit_logs").isJsonArray()) {
+                                array = obj.getAsJsonArray("audit_logs");
+                            } else if (obj.has("auditLogs") && obj.get("auditLogs").isJsonArray()) {
+                                array = obj.getAsJsonArray("auditLogs");
+                            } else if (obj.has("data") && obj.get("data").isJsonArray()) {
+                                array = obj.getAsJsonArray("data");
+                            }
                         }
 
                         displayAuditLogsDialog(array);
                     } catch (Exception e) {
                         Log.e(TAG, "Error parsing audit logs", e);
-                        Toast.makeText(this, "Failed to parse audit logs", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(AdminDashboardActivity.this, "Failed to parse audit logs", Toast.LENGTH_SHORT).show();
                     }
-                },
-                error -> {
-                    String errMessage = "Failed to fetch audit logs";
-                    if (error.networkResponse != null && error.networkResponse.statusCode == 429) {
-                        errMessage = "Too many attempts. Please wait a few minutes and try again.";
-                    }
-                    Toast.makeText(this, errMessage, Toast.LENGTH_SHORT).show();
+                } else {
+                    String errMessage = ApiClient.parseErrorMessage(response, "Failed to fetch audit logs");
+                    Toast.makeText(AdminDashboardActivity.this, errMessage, Toast.LENGTH_SHORT).show();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
             }
-        };
 
-        request.setRetryPolicy(new DefaultRetryPolicy(
-                30000,
-                DefaultRetryPolicy.DEFAULT_MAX_RETRIES,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<com.google.gson.JsonElement> call, @NonNull Throwable t) {
+                Log.e(TAG, "Error fetching audit logs", t);
+                String msg = t.getMessage() != null && !t.getMessage().isEmpty() ? t.getMessage() : "Failed to fetch audit logs";
+                Toast.makeText(AdminDashboardActivity.this, msg, Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private void exportElectionReport(Button exportBtn) {
@@ -1162,17 +1270,14 @@ public class AdminDashboardActivity extends AppCompatActivity {
             exportBtn.setText("EXPORTING REPORT...");
         }
 
-        String url = BASE_URL + "/api/admin/export-results/" + currentPollId;
-        String token = getJwtToken();
-
-        StringRequest request = new StringRequest(
-                Request.Method.GET,
-                url,
-                response -> {
-                    if (exportBtn != null) {
-                        exportBtn.setEnabled(true);
-                        exportBtn.setText("EXPORT OFFICIAL REPORT (CSV)");
-                    }
+        ApiClient.getApiService(this).exportResults(currentPollId).enqueue(new Callback<ResponseBody>() {
+            @Override
+            public void onResponse(@NonNull Call<ResponseBody> call, @NonNull Response<ResponseBody> response) {
+                if (exportBtn != null) {
+                    exportBtn.setEnabled(true);
+                    exportBtn.setText("EXPORT OFFICIAL REPORT (CSV)");
+                }
+                if (response.isSuccessful() && response.body() != null) {
                     try {
                         java.io.File reportsDir = new java.io.File(getCacheDir(), "reports");
                         if (!reportsDir.exists()) {
@@ -1181,11 +1286,11 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
                         java.io.File reportFile = new java.io.File(reportsDir, "election-report-poll-" + currentPollId + ".csv");
                         java.io.FileOutputStream fos = new java.io.FileOutputStream(reportFile);
-                        fos.write(response != null ? response.getBytes("UTF-8") : new byte[0]);
+                        fos.write(response.body().bytes());
                         fos.flush();
                         fos.close();
 
-                        Uri contentUri = androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", reportFile);
+                        Uri contentUri = androidx.core.content.FileProvider.getUriForFile(AdminDashboardActivity.this, getPackageName() + ".fileprovider", reportFile);
 
                         Intent shareIntent = new Intent(Intent.ACTION_SEND);
                         shareIntent.setType("text/csv");
@@ -1195,41 +1300,26 @@ public class AdminDashboardActivity extends AppCompatActivity {
                         shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
 
                         startActivity(Intent.createChooser(shareIntent, "Share Official Election Report"));
-                        Toast.makeText(this, "Report generated and ready to share!", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(AdminDashboardActivity.this, "Report generated and ready to share!", Toast.LENGTH_SHORT).show();
                     } catch (Exception e) {
                         Log.e(TAG, "Failed to save or share CSV report", e);
-                        Toast.makeText(this, "Failed to generate CSV report. Please try again.", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(AdminDashboardActivity.this, "Failed to generate CSV report. Please try again.", Toast.LENGTH_SHORT).show();
                     }
-                },
-                error -> {
-                    if (exportBtn != null) {
-                        exportBtn.setEnabled(true);
-                        exportBtn.setText("EXPORT OFFICIAL REPORT (CSV)");
-                    }
-                    String errMessage = "Failed to export report";
-                    if (error.networkResponse != null && error.networkResponse.statusCode == 429) {
-                        errMessage = "Too many attempts. Please wait a few minutes and try again.";
-                    }
-                    Toast.makeText(this, errMessage, Toast.LENGTH_SHORT).show();
+                } else {
+                    String errMessage = ApiClient.parseErrorMessage(response, "Failed to export report");
+                    Toast.makeText(AdminDashboardActivity.this, errMessage, Toast.LENGTH_SHORT).show();
                 }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                Map<String, String> headers = new HashMap<>();
-                if (token != null) {
-                    headers.put("Authorization", "Bearer " + token);
-                }
-                return headers;
             }
-        };
 
-        request.setRetryPolicy(new DefaultRetryPolicy(
-                60000,
-                0,
-                DefaultRetryPolicy.DEFAULT_BACKOFF_MULT
-        ));
-
-        Volley.newRequestQueue(this).add(request);
+            @Override
+            public void onFailure(@NonNull Call<ResponseBody> call, @NonNull Throwable t) {
+                if (exportBtn != null) {
+                    exportBtn.setEnabled(true);
+                    exportBtn.setText("EXPORT OFFICIAL REPORT (CSV)");
+                }
+                Toast.makeText(AdminDashboardActivity.this, "Failed to export report", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     private String formatAuditTimestamp(String rawTs) {
@@ -1272,76 +1362,75 @@ public class AdminDashboardActivity extends AppCompatActivity {
         return sb.toString().trim();
     }
 
-    private String formatAuditDetails(String action, String rawDetails) {
-        if (rawDetails == null || rawDetails.isEmpty() || rawDetails.equalsIgnoreCase("null")) {
-            return "";
-        }
-
+    private String formatAuditDetails(String action, JsonObject json) {
+        if (json == null) return "";
         String upperAction = action != null ? action.toUpperCase(java.util.Locale.US) : "";
 
-        try {
-            JSONObject json = new JSONObject(rawDetails.trim());
-
-            if (upperAction.contains("APPROVE") && json.has("voter_id")) {
-                return "Voter ID #" + json.optInt("voter_id") + " — Access Approved";
-            }
-            if (upperAction.contains("REVOKE") && json.has("voter_id")) {
-                return "Voter ID #" + json.optInt("voter_id") + " — Access Revoked";
-            }
-            if (upperAction.contains("ADD_CANDIDATE")) {
-                String candidateName = json.optString("candidate_name", json.optString("name", "N/A"));
-                return "Added Candidate: " + candidateName;
-            }
-            if (upperAction.contains("DELETE_CANDIDATE")) {
-                int candId = json.optInt("candidate_id", json.optInt("id", 0));
-                return "Removed Candidate ID #" + candId;
-            }
-            if (upperAction.contains("EXPORT")) {
-                int pollId = json.optInt("poll_id", 1);
-                return "Exported CSV Report for Poll #" + pollId;
-            }
-
-            StringBuilder sb = new StringBuilder();
-            java.util.Iterator<String> keys = json.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                Object val = json.get(key);
-                String cleanKey = formatActionTitle(key);
-                sb.append(cleanKey).append(": ").append(val.toString()).append(" • ");
-            }
-            if (sb.length() > 3) {
-                sb.setLength(sb.length() - 3);
-            }
-            return sb.toString();
-
-        } catch (JSONException e) {
-            return rawDetails;
+        if (upperAction.contains("APPROVE") && json.has("voter_id")) {
+            return "Voter ID #" + json.get("voter_id").getAsInt() + " — Access Approved";
         }
+        if (upperAction.contains("REVOKE") && json.has("voter_id")) {
+            return "Voter ID #" + json.get("voter_id").getAsInt() + " — Access Revoked";
+        }
+        if (upperAction.contains("ADD_CANDIDATE")) {
+            String candidateName = json.has("candidate_name") ? json.get("candidate_name").getAsString() : (json.has("name") ? json.get("name").getAsString() : "N/A");
+            return "Added Candidate: " + candidateName;
+        }
+        if (upperAction.contains("DELETE_CANDIDATE")) {
+            int candId = json.has("candidate_id") ? json.get("candidate_id").getAsInt() : (json.has("id") ? json.get("id").getAsInt() : 0);
+            return "Removed Candidate ID #" + candId;
+        }
+        if (upperAction.contains("EXPORT")) {
+            int pollId = json.has("poll_id") ? json.get("poll_id").getAsInt() : currentPollId;
+            return "Exported CSV Report for Poll #" + pollId;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        for (String key : json.keySet()) {
+            JsonElement val = json.get(key);
+            String cleanKey = formatActionTitle(key);
+            sb.append(cleanKey).append(": ").append(val.toString()).append(" • ");
+        }
+        if (sb.length() > 3) {
+            sb.setLength(sb.length() - 3);
+        }
+        return sb.toString();
     }
 
-    private void displayAuditLogsDialog(JSONArray array) {
+    private void displayAuditLogsDialog(JsonArray array) {
         android.widget.ScrollView scrollView = new android.widget.ScrollView(this);
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
         container.setPadding(48, 32, 48, 32);
 
-        if (array == null || array.length() == 0) {
+        if (array == null || array.size() == 0) {
             TextView emptyText = new TextView(this);
             emptyText.setText("No audit logs recorded yet.");
             emptyText.setTextColor(Color.parseColor("#64748B"));
             emptyText.setTextSize(14);
             container.addView(emptyText);
         } else {
-            for (int i = 0; i < array.length(); i++) {
-                JSONObject log = array.optJSONObject(i);
-                if (log == null) continue;
+            for (int i = 0; i < array.size(); i++) {
+                if (!array.get(i).isJsonObject()) continue;
+                JsonObject log = array.get(i).getAsJsonObject();
 
-                String rawAction = log.optString("action", log.optString("event_type", "System Event"));
+                String rawAction = log.has("action") ? log.get("action").getAsString() : (log.has("event_type") ? log.get("event_type").getAsString() : "System Event");
                 String actionTitle = formatActionTitle(rawAction);
-                String adminEmail = log.optString("admin_email", log.optString("user_email", log.optString("performed_by", "Admin")));
-                String rawDetails = log.optString("target_details", log.optString("details", ""));
-                String formattedDetails = formatAuditDetails(rawAction, rawDetails);
-                String rawCreatedAt = log.optString("created_at", log.optString("timestamp", ""));
+                String adminEmail = log.has("admin_email") ? log.get("admin_email").getAsString() : (log.has("user_email") ? log.get("user_email").getAsString() : (log.has("performed_by") ? log.get("performed_by").getAsString() : "Admin"));
+                
+                JsonObject detailsJson = null;
+                if (log.has("target_details") && log.get("target_details").isJsonObject()) {
+                    detailsJson = log.getAsJsonObject("target_details");
+                } else if (log.has("details") && log.get("details").isJsonObject()) {
+                    detailsJson = log.getAsJsonObject("details");
+                } else if (log.has("target_details") && log.get("target_details").isJsonPrimitive()) {
+                    try {
+                        detailsJson = JsonParser.parseString(log.get("target_details").getAsString()).getAsJsonObject();
+                    } catch (Exception ignored) {}
+                }
+
+                String formattedDetails = formatAuditDetails(rawAction, detailsJson);
+                String rawCreatedAt = log.has("created_at") ? log.get("created_at").getAsString() : (log.has("timestamp") ? log.get("timestamp").getAsString() : "");
                 String formattedTime = formatAuditTimestamp(rawCreatedAt);
 
                 com.google.android.material.card.MaterialCardView card = new com.google.android.material.card.MaterialCardView(this);
