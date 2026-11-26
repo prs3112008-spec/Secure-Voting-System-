@@ -81,4 +81,7 @@ public interface VotingApiService {
 
     @GET("api/admin/export-results/{pollId}")
     Call<ResponseBody> exportResults(@Path("pollId") int pollId);
+
+    @POST("api/admin/delegate-role")
+    Call<JsonObject> delegateRole(@Body JsonObject body);
 }

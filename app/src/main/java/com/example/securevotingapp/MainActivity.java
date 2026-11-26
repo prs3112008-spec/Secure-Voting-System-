@@ -76,10 +76,20 @@ public class MainActivity extends AppCompatActivity {
                     String token = respObj.has("token") ? respObj.get("token").getAsString() : "";
                     String role = respObj.has("role") ? respObj.get("role").getAsString() : "voter";
 
+                    JsonObject permissionsObj = null;
+                    if (respObj.has("permissions") && respObj.get("permissions").isJsonObject()) {
+                        permissionsObj = respObj.getAsJsonObject("permissions");
+                    }
+
                     SharedPreferences sharedPreferences = SecurePrefs.get(MainActivity.this);
                     SharedPreferences.Editor editor = sharedPreferences.edit();
                     editor.putString("jwt_token", token);
                     editor.putString("role", role);
+                    if (permissionsObj != null) {
+                        editor.putString("permissions_json", permissionsObj.toString());
+                    } else {
+                        editor.remove("permissions_json");
+                    }
                     editor.apply();
 
                     Toast.makeText(MainActivity.this, "Login Successful!", Toast.LENGTH_SHORT).show();

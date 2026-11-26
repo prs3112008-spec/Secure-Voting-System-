@@ -197,15 +197,36 @@ public class DashboardActivity extends AppCompatActivity {
         SharedPreferences sharedPreferences = SecurePrefs.get(this);
         String userRole = sharedPreferences.getString("role", "voter");
 
+        boolean isSuperAdmin = "super_admin".equalsIgnoreCase(userRole) || "admin".equalsIgnoreCase(userRole);
+        boolean isSubAdmin = "sub_admin".equalsIgnoreCase(userRole);
+        boolean isAdminOrSubAdmin = isSuperAdmin || isSubAdmin;
+
+        boolean canViewResults = true;
+        if (isSubAdmin) {
+            String permsJson = sharedPreferences.getString("permissions_json", null);
+            if (permsJson != null) {
+                try {
+                    JsonObject pObj = com.google.gson.JsonParser.parseString(permsJson).getAsJsonObject();
+                    if (pObj.has("can_view_results")) {
+                        canViewResults = pObj.get("can_view_results").getAsBoolean();
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
+        if (!canViewResults && goToResultsButton != null) {
+            goToResultsButton.setVisibility(View.GONE);
+        }
+
         TextView dashboardSubtitleText = findViewById(R.id.dashboardSubtitleText);
         View adminInfoCard = findViewById(R.id.adminInfoCard);
         Button verifyVoteButton = findViewById(R.id.verifyVoteButton);
         ProgressBar dashboardProgressBar = findViewById(R.id.dashboardProgressBar);
         TextView voterEmptyStateText = findViewById(R.id.voterEmptyStateText);
 
-        if ("admin".equalsIgnoreCase(userRole)) {
+        if (isAdminOrSubAdmin) {
             if (dashboardSubtitleText != null) {
-                dashboardSubtitleText.setText("Authenticated Administrator Session");
+                dashboardSubtitleText.setText(isSuperAdmin ? "Authenticated Administrator Session" : "Authenticated Election Officer Session");
             }
             goToAdminButton.setVisibility(View.VISIBLE);
             if (candidatesRecyclerView != null) candidatesRecyclerView.setVisibility(View.GONE);
@@ -397,8 +418,9 @@ public class DashboardActivity extends AppCompatActivity {
 
         SharedPreferences sharedPreferences = SecurePrefs.get(this);
         String userRole = sharedPreferences.getString("role", "voter");
+        boolean isAdminOrSubAdmin = "super_admin".equalsIgnoreCase(userRole) || "admin".equalsIgnoreCase(userRole) || "sub_admin".equalsIgnoreCase(userRole);
 
-        if (!"admin".equalsIgnoreCase(userRole)) {
+        if (!isAdminOrSubAdmin) {
             fetchCandidates();
             checkVoteStatus();
         }

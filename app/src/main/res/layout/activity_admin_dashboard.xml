@@ -186,6 +186,7 @@
                             android:textStyle="bold"/>
 
                         <TextView
+                            android:id="@+id/adminConsoleSubtitleText"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="Election Authority System Console"
