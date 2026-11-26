@@ -658,43 +658,51 @@
                                 android:textSize="14sp" />
                         </com.google.android.material.textfield.TextInputLayout>
 
-                        <com.google.android.material.chip.ChipGroup
-                            android:id="@+id/voterFilterChipGroup"
+                        <!-- Horizontal Scrollable Single-Row Filter Chips -->
+                        <HorizontalScrollView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginBottom="12dp"
-                            app:singleSelection="true"
-                            app:selectionRequired="true">
+                            android:scrollbars="none">
 
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipFilterAll"
-                                style="@style/Widget.MaterialComponents.Chip.Choice"
+                            <com.google.android.material.chip.ChipGroup
+                                android:id="@+id/voterFilterChipGroup"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:checked="true"
-                                android:text="All" />
+                                app:singleLine="true"
+                                app:singleSelection="true"
+                                app:selectionRequired="true">
 
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipFilterPending"
-                                style="@style/Widget.MaterialComponents.Chip.Choice"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Pending" />
+                                <com.google.android.material.chip.Chip
+                                    android:id="@+id/chipFilterAll"
+                                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:checked="true"
+                                    android:text="All" />
 
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipFilterApproved"
-                                style="@style/Widget.MaterialComponents.Chip.Choice"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Approved" />
+                                <com.google.android.material.chip.Chip
+                                    android:id="@+id/chipFilterPending"
+                                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="Pending" />
 
-                            <com.google.android.material.chip.Chip
-                                android:id="@+id/chipFilterSubAdmins"
-                                style="@style/Widget.MaterialComponents.Chip.Choice"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="Sub-Admins" />
-                        </com.google.android.material.chip.ChipGroup>
+                                <com.google.android.material.chip.Chip
+                                    android:id="@+id/chipFilterApproved"
+                                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="Approved" />
+
+                                <com.google.android.material.chip.Chip
+                                    android:id="@+id/chipFilterSubAdmins"
+                                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="Sub-Admins" />
+                            </com.google.android.material.chip.ChipGroup>
+                        </HorizontalScrollView>
 
                         <LinearLayout
                             android:id="@+id/votersContainer"

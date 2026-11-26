@@ -915,8 +915,16 @@ public class AdminDashboardActivity extends AppCompatActivity {
             subAdminBadge.setTextColor(Color.WHITE);
             subAdminBadge.setTextSize(10);
             subAdminBadge.setTypeface(null, android.graphics.Typeface.BOLD);
-            subAdminBadge.setBackgroundColor(Color.parseColor("#1E3A8A"));
-            subAdminBadge.setPadding(16, 6, 16, 6);
+
+            android.graphics.drawable.GradientDrawable badgeBg = new android.graphics.drawable.GradientDrawable();
+            badgeBg.setColor(Color.parseColor("#1E3A8A"));
+            badgeBg.setCornerRadius(6 * getResources().getDisplayMetrics().density);
+            subAdminBadge.setBackground(badgeBg);
+
+            int badgePadH = (int) (8 * getResources().getDisplayMetrics().density);
+            int badgePadV = (int) (2 * getResources().getDisplayMetrics().density);
+            subAdminBadge.setPadding(badgePadH, badgePadV, badgePadH, badgePadV);
+
             LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             badgeParams.setMarginStart((int) (10 * getResources().getDisplayMetrics().density));
@@ -936,7 +944,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
         btnRowParams.setMargins(0, (int) (12 * getResources().getDisplayMetrics().density), 0, 0);
         btnRow.setLayoutParams(btnRowParams);
 
-        int padH = (int) (14 * getResources().getDisplayMetrics().density);
+        int padH = (int) (16 * getResources().getDisplayMetrics().density);
         int minW = (int) (84 * getResources().getDisplayMetrics().density);
 
         com.google.android.material.button.MaterialButton actionButton;
@@ -955,6 +963,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
         }
         actionButton.setPadding(padH, actionButton.getPaddingTop(), padH, actionButton.getPaddingBottom());
         actionButton.setMinimumWidth(minW);
+        actionButton.setGravity(Gravity.CENTER);
         actionButton.setCornerRadius((int) (16 * getResources().getDisplayMetrics().density));
         actionButton.setOnClickListener(v -> confirmUpdateVoterApproval(voter.userId, !voter.isApproved, actionButton, voter.email));
 
@@ -970,6 +979,7 @@ public class AdminDashboardActivity extends AppCompatActivity {
             delegateBtn.setTextColor(Color.parseColor("#1E3A8A"));
             delegateBtn.setPadding(padH, delegateBtn.getPaddingTop(), padH, delegateBtn.getPaddingBottom());
             delegateBtn.setMinimumWidth(minW);
+            delegateBtn.setGravity(Gravity.CENTER);
             delegateBtn.setCornerRadius((int) (16 * getResources().getDisplayMetrics().density));
             LinearLayout.LayoutParams dParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
