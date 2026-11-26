@@ -344,6 +344,8 @@ public class AdminDashboardActivity extends AppCompatActivity {
                     currentVoterFilterMode = "PENDING";
                 } else if (checkedId == R.id.chipFilterApproved) {
                     currentVoterFilterMode = "APPROVED";
+                } else if (checkedId == R.id.chipFilterSubAdmins) {
+                    currentVoterFilterMode = "SUB_ADMINS";
                 } else {
                     currentVoterFilterMode = "ALL";
                 }
@@ -839,6 +841,8 @@ public class AdminDashboardActivity extends AppCompatActivity {
                 matchesFilter = false;
             } else if ("APPROVED".equalsIgnoreCase(currentVoterFilterMode) && !voter.isApproved) {
                 matchesFilter = false;
+            } else if ("SUB_ADMINS".equalsIgnoreCase(currentVoterFilterMode) && !"sub_admin".equalsIgnoreCase(voter.role)) {
+                matchesFilter = false;
             }
 
             boolean matchesSearch = true;
@@ -868,42 +872,69 @@ public class AdminDashboardActivity extends AppCompatActivity {
         String myRole = prefs.getString("role", "voter");
         boolean isSuperAdmin = "super_admin".equalsIgnoreCase(myRole) || "admin".equalsIgnoreCase(myRole);
 
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(24, 20, 24, 20);
-        row.setBackgroundColor(Color.WHITE);
-        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+        com.google.android.material.card.MaterialCardView card = new com.google.android.material.card.MaterialCardView(this);
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        rowParams.setMargins(0, 0, 0, 16);
-        row.setLayoutParams(rowParams);
+        cardParams.setMargins(0, 0, 0, 16);
+        card.setLayoutParams(cardParams);
+        card.setCardBackgroundColor(Color.WHITE);
+        card.setRadius(24f);
+        card.setStrokeColor(Color.parseColor("#E2E8F0"));
+        card.setStrokeWidth(2);
+        card.setCardElevation(0f);
 
-        LinearLayout textLayout = new LinearLayout(this);
-        textLayout.setOrientation(LinearLayout.VERTICAL);
-        textLayout.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout cardLayout = new LinearLayout(this);
+        cardLayout.setOrientation(LinearLayout.VERTICAL);
+        cardLayout.setPadding(24, 20, 24, 20);
 
         TextView emailText = new TextView(this);
         emailText.setText(voter.email);
         emailText.setTextColor(Color.parseColor("#1E293B"));
         emailText.setTextSize(15);
         emailText.setTypeface(null, android.graphics.Typeface.BOLD);
+        emailText.setSingleLine(true);
+        emailText.setEllipsize(android.text.TextUtils.TruncateAt.END);
+
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        statusRow.setPadding(0, 4, 0, 0);
 
         TextView statusText = new TextView(this);
-        String statusStr = "Status: " + (voter.isApproved ? "Approved" : "Pending");
-        if ("sub_admin".equalsIgnoreCase(voter.role)) {
-            statusStr += " [SUB-ADMIN]";
-        }
-        statusText.setText(statusStr);
-        statusText.setTextColor("sub_admin".equalsIgnoreCase(voter.role) ? Color.parseColor("#2563EB") : (voter.isApproved ? Color.parseColor("#15803D") : Color.parseColor("#B45309")));
+        statusText.setText("Status: " + (voter.isApproved ? "Approved" : "Pending"));
+        statusText.setTextColor(voter.isApproved ? Color.parseColor("#15803D") : Color.parseColor("#B45309"));
         statusText.setTextSize(13);
 
-        textLayout.addView(emailText);
-        textLayout.addView(statusText);
+        statusRow.addView(statusText);
 
-        LinearLayout btnContainer = new LinearLayout(this);
-        btnContainer.setOrientation(LinearLayout.HORIZONTAL);
+        if ("sub_admin".equalsIgnoreCase(voter.role)) {
+            TextView subAdminBadge = new TextView(this);
+            subAdminBadge.setText("SUB-ADMIN");
+            subAdminBadge.setTextColor(Color.WHITE);
+            subAdminBadge.setTextSize(10);
+            subAdminBadge.setTypeface(null, android.graphics.Typeface.BOLD);
+            subAdminBadge.setBackgroundColor(Color.parseColor("#1E3A8A"));
+            subAdminBadge.setPadding(16, 6, 16, 6);
+            LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            badgeParams.setMarginStart((int) (10 * getResources().getDisplayMetrics().density));
+            subAdminBadge.setLayoutParams(badgeParams);
+
+            statusRow.addView(subAdminBadge);
+        }
+
+        cardLayout.addView(emailText);
+        cardLayout.addView(statusRow);
+
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams btnRowParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        btnRowParams.setMargins(0, (int) (12 * getResources().getDisplayMetrics().density), 0, 0);
+        btnRow.setLayoutParams(btnRowParams);
 
         int padH = (int) (14 * getResources().getDisplayMetrics().density);
         int minW = (int) (84 * getResources().getDisplayMetrics().density);
@@ -925,15 +956,14 @@ public class AdminDashboardActivity extends AppCompatActivity {
         actionButton.setPadding(padH, actionButton.getPaddingTop(), padH, actionButton.getPaddingBottom());
         actionButton.setMinimumWidth(minW);
         actionButton.setCornerRadius((int) (16 * getResources().getDisplayMetrics().density));
-
         actionButton.setOnClickListener(v -> confirmUpdateVoterApproval(voter.userId, !voter.isApproved, actionButton, voter.email));
 
-        btnContainer.addView(actionButton);
+        btnRow.addView(actionButton);
 
         if (voter.isApproved && isSuperAdmin) {
             com.google.android.material.button.MaterialButton delegateBtn =
                     new com.google.android.material.button.MaterialButton(this, null, com.google.android.material.R.style.Widget_MaterialComponents_Button_OutlinedButton);
-            delegateBtn.setText("Delegate");
+            delegateBtn.setText("sub_admin".equalsIgnoreCase(voter.role) ? "Manage Role" : "Delegate");
             delegateBtn.setBackgroundColor(Color.WHITE);
             delegateBtn.setStrokeColor(android.content.res.ColorStateList.valueOf(Color.parseColor("#1E3A8A")));
             delegateBtn.setStrokeWidth((int) (1.5f * getResources().getDisplayMetrics().density));
@@ -947,12 +977,12 @@ public class AdminDashboardActivity extends AppCompatActivity {
             delegateBtn.setLayoutParams(dParams);
             delegateBtn.setOnClickListener(v -> showDelegateDialog(voter));
 
-            btnContainer.addView(delegateBtn);
+            btnRow.addView(delegateBtn);
         }
 
-        row.addView(textLayout);
-        row.addView(btnContainer);
-        votersContainer.addView(row);
+        cardLayout.addView(btnRow);
+        card.addView(cardLayout);
+        votersContainer.addView(card);
     }
 
     private void showDelegateDialog(VoterItem voter) {
@@ -984,25 +1014,33 @@ public class AdminDashboardActivity extends AppCompatActivity {
         permsContainer.setPadding(16, 16, 16, 16);
         permsContainer.setVisibility(isCurrentlySubAdmin ? View.VISIBLE : View.GONE);
 
+        boolean hasApprove = !voter.permissions.has("can_approve_voters") || voter.permissions.get("can_approve_voters").getAsBoolean();
+        boolean hasResults = !voter.permissions.has("can_view_results") || voter.permissions.get("can_view_results").getAsBoolean();
+        boolean hasExport = !voter.permissions.has("can_export_csv") || voter.permissions.get("can_export_csv").getAsBoolean();
+
         com.google.android.material.checkbox.MaterialCheckBox cbApproveVoters = new com.google.android.material.checkbox.MaterialCheckBox(this);
-        cbApproveVoters.setText("Approve / Revoke Voters (can_approve_voters)");
-        cbApproveVoters.setChecked(!voter.permissions.has("can_approve_voters") || voter.permissions.get("can_approve_voters").getAsBoolean());
+        cbApproveVoters.setText("Approve / Revoke Voters");
+        cbApproveVoters.setChecked(isCurrentlySubAdmin ? hasApprove : true);
 
         com.google.android.material.checkbox.MaterialCheckBox cbViewResults = new com.google.android.material.checkbox.MaterialCheckBox(this);
-        cbViewResults.setText("View Live Results (can_view_results)");
-        cbViewResults.setChecked(!voter.permissions.has("can_view_results") || voter.permissions.get("can_view_results").getAsBoolean());
+        cbViewResults.setText("View Live Results");
+        cbViewResults.setChecked(isCurrentlySubAdmin ? hasResults : true);
 
         com.google.android.material.checkbox.MaterialCheckBox cbExportCsv = new com.google.android.material.checkbox.MaterialCheckBox(this);
-        cbExportCsv.setText("Export Official CSV Report (can_export_csv)");
-        cbExportCsv.setChecked(!voter.permissions.has("can_export_csv") || voter.permissions.get("can_export_csv").getAsBoolean());
+        cbExportCsv.setText("Export Official CSV Report");
+        cbExportCsv.setChecked(isCurrentlySubAdmin ? hasExport : true);
+
+        TextView helperLabel = new TextView(this);
+        helperLabel.setText("Select at least one permission");
+        helperLabel.setTextColor(Color.parseColor("#DC2626"));
+        helperLabel.setTextSize(12);
+        helperLabel.setPadding(0, 8, 0, 0);
+        helperLabel.setVisibility(View.GONE);
 
         permsContainer.addView(cbApproveVoters);
         permsContainer.addView(cbViewResults);
         permsContainer.addView(cbExportCsv);
-
-        subAdminSwitch.setOnCheckedChangeListener((btn, isChecked) -> {
-            permsContainer.setVisibility(isChecked ? View.VISIBLE : View.GONE);
-        });
+        permsContainer.addView(helperLabel);
 
         container.addView(headerText);
         container.addView(userEmailText);
@@ -1049,6 +1087,33 @@ public class AdminDashboardActivity extends AppCompatActivity {
         if (dialog.getWindow() != null) {
             dialog.getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Color.WHITE));
         }
+
+        Runnable updateGuard = () -> {
+            Button posBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (subAdminSwitch.isChecked()) {
+                boolean atLeastOne = cbApproveVoters.isChecked() || cbViewResults.isChecked() || cbExportCsv.isChecked();
+                helperLabel.setVisibility(atLeastOne ? View.GONE : View.VISIBLE);
+                if (posBtn != null) {
+                    posBtn.setEnabled(atLeastOne);
+                }
+            } else {
+                helperLabel.setVisibility(View.GONE);
+                if (posBtn != null) {
+                    posBtn.setEnabled(true);
+                }
+            }
+        };
+
+        subAdminSwitch.setOnCheckedChangeListener((btn, isChecked) -> {
+            permsContainer.setVisibility(isChecked ? View.VISIBLE : View.GONE);
+            updateGuard.run();
+        });
+
+        cbApproveVoters.setOnCheckedChangeListener((btn, isChecked) -> updateGuard.run());
+        cbViewResults.setOnCheckedChangeListener((btn, isChecked) -> updateGuard.run());
+        cbExportCsv.setOnCheckedChangeListener((btn, isChecked) -> updateGuard.run());
+
+        dialog.setOnShowListener(d -> updateGuard.run());
         dialog.show();
 
         Button posBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
@@ -1577,6 +1642,40 @@ public class AdminDashboardActivity extends AppCompatActivity {
     private String formatAuditDetails(String action, JsonObject json) {
         if (json == null) return "";
         String upperAction = action != null ? action.toUpperCase(java.util.Locale.US) : "";
+
+        if (upperAction.contains("DELEGATE") || upperAction.contains("ROLE")) {
+            int userId = json.has("user_id") ? json.get("user_id").getAsInt() : (json.has("voter_id") ? json.get("voter_id").getAsInt() : 0);
+            String role = json.has("role") ? json.get("role").getAsString() : "";
+            if ("sub_admin".equalsIgnoreCase(role)) {
+                ArrayList<String> permsList = new ArrayList<>();
+                if (json.has("permissions") && json.get("permissions").isJsonObject()) {
+                    JsonObject perms = json.getAsJsonObject("permissions");
+                    if (!perms.has("can_approve_voters") || perms.get("can_approve_voters").getAsBoolean()) permsList.add("Approve Voters");
+                    if (!perms.has("can_view_results") || perms.get("can_view_results").getAsBoolean()) permsList.add("Live Results");
+                    if (!perms.has("can_export_csv") || perms.get("can_export_csv").getAsBoolean()) permsList.add("Export CSV");
+                }
+                String permStr = permsList.isEmpty() ? "No permissions" : android.text.TextUtils.join(", ", permsList);
+                return "User #" + userId + " promoted to Sub-Admin • " + permStr;
+            } else {
+                return "User #" + userId + " demoted to Voter";
+            }
+        }
+
+        if (upperAction.contains("SCHEDULE")) {
+            int pollId = json.has("poll_id") ? json.get("poll_id").getAsInt() : currentPollId;
+            String startRaw = json.has("start_time") ? json.get("start_time").getAsString() : "";
+            String endRaw = json.has("end_time") ? json.get("end_time").getAsString() : "";
+            boolean isActive = !json.has("is_active") || json.get("is_active").getAsBoolean();
+
+            String startFormatted = formatScheduleLocalDisplay(startRaw);
+            String endFormatted = formatScheduleLocalDisplay(endRaw);
+
+            String timeRange = (!startFormatted.isEmpty() && !endFormatted.isEmpty())
+                    ? startFormatted + " – " + endFormatted
+                    : (!startRaw.isEmpty() ? startRaw : "No schedule set");
+
+            return "Poll #" + pollId + " • " + timeRange + (isActive ? " (Active)" : " (Paused)");
+        }
 
         if (upperAction.contains("APPROVE") && json.has("voter_id")) {
             return "Voter ID #" + json.get("voter_id").getAsInt() + " — Access Approved";
