@@ -214,6 +214,11 @@ public class AdminDashboardActivity extends AppCompatActivity {
             adminConsoleSubtitleText.setText(isSubAdmin ? "Delegated Election Officer Console" : "Election Authority System Console");
         }
 
+        TextView electionCardTitle = findViewById(R.id.electionCardTitle);
+        if (electionCardTitle != null) {
+            electionCardTitle.setText(isSubAdmin ? "Election Reports & Controls" : "Election Schedule & Master Switch");
+        }
+
         tabElectionBtn = findViewById(R.id.tabElectionBtn);
         tabCandidatesBtn = findViewById(R.id.tabCandidatesBtn);
         tabVotersBtn = findViewById(R.id.tabVotersBtn);
