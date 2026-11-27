@@ -149,7 +149,10 @@ public class DashboardActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
+        getWindow().setFlags(
+                android.view.WindowManager.LayoutParams.FLAG_SECURE,
+                android.view.WindowManager.LayoutParams.FLAG_SECURE
+        );
         super.setContentView(R.layout.activity_dashboard);
 
         dashboardSwipeRefresh = findViewById(R.id.dashboardSwipeRefresh);
