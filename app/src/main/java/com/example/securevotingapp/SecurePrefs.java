@@ -5,7 +5,7 @@ import android.content.SharedPreferences;
 import android.util.Log;
 
 import androidx.security.crypto.EncryptedSharedPreferences;
-import androidx.security.crypto.MasterKeys;
+import androidx.security.crypto.MasterKey;
 
 public class SecurePrefs {
 
@@ -17,38 +17,55 @@ public class SecurePrefs {
 
     public static synchronized SharedPreferences get(Context context) {
         if (instance == null) {
+            Context appContext = context.getApplicationContext();
+
+            // 1. Synchronously purge any legacy plaintext preferences immediately
+            purgeLegacyPrefs(appContext);
+
             try {
-                Context appContext = context.getApplicationContext();
-                String masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC);
+                MasterKey masterKey = new MasterKey.Builder(appContext)
+                        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                        .build();
 
                 instance = EncryptedSharedPreferences.create(
-                        ENCRYPTED_PREFS_NAME,
-                        masterKeyAlias,
                         appContext,
-                        EncryptedSharedPreferences.PrefKeyEncryptionScheme.values()[0],
-                        EncryptedSharedPreferences.PrefValueEncryptionScheme.values()[0]
+                        ENCRYPTED_PREFS_NAME,
+                        masterKey,
+                        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
                 );
-
-                // Safe migration/cleanup: If old plaintext preferences file exists, clear it
-                SharedPreferences legacyPrefs = appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
-                if (legacyPrefs.contains("jwt_token")) {
-                    legacyPrefs.edit().clear().apply();
-                }
             } catch (Exception e) {
-                Log.e(TAG, "Failed to initialize EncryptedSharedPreferences, falling back to standard preferences", e);
-                instance = context.getApplicationContext().getSharedPreferences(ENCRYPTED_PREFS_NAME, Context.MODE_PRIVATE);
+                // 2. Fail closed: Do NOT silently downgrade to plaintext storage
+                Log.e(TAG, "Hardware Keystore initialization failed; refusing plaintext fallback", e);
+                throw new IllegalStateException("Secure storage unavailable", e);
             }
         }
         return instance;
     }
 
-    public static void clear(Context context) {
-        SharedPreferences prefs = get(context);
-        prefs.edit().clear().apply();
-
+    public static synchronized void clear(Context context) {
+        Context appContext = context.getApplicationContext();
         try {
-            SharedPreferences legacyPrefs = context.getApplicationContext().getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
-            legacyPrefs.edit().clear().apply();
+            if (instance != null) {
+                instance.edit().clear().commit();
+            } else {
+                appContext.deleteSharedPreferences(ENCRYPTED_PREFS_NAME);
+            }
+        } catch (Exception e) {
+            // If Keystore is corrupted, delete the encrypted XML file completely so the user can re-login cleanly
+            appContext.deleteSharedPreferences(ENCRYPTED_PREFS_NAME);
+            instance = null;
+        }
+        purgeLegacyPrefs(appContext);
+    }
+
+    private static void purgeLegacyPrefs(Context appContext) {
+        try {
+            SharedPreferences legacyPrefs = appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
+            if (!legacyPrefs.getAll().isEmpty()) {
+                legacyPrefs.edit().clear().commit();
+            }
+            appContext.deleteSharedPreferences(LEGACY_PREFS_NAME);
         } catch (Exception ignored) {}
     }
 }

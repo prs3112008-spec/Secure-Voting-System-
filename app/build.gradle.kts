@@ -53,7 +53,7 @@ dependencies {
 
     implementation("com.github.bumptech.glide:glide:4.16.0")
     implementation("androidx.biometric:biometric:1.1.0")
-    implementation("androidx.security:security-crypto:1.0.0")
+    implementation("androidx.security:security-crypto:1.1.0")
 
     // Retrofit 2 & OkHttp 3
     implementation("com.squareup.retrofit2:retrofit:2.11.0")

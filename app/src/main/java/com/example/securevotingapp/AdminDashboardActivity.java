@@ -165,10 +165,17 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
     private androidx.swiperefreshlayout.widget.SwipeRefreshLayout adminSwipeRefresh;
 
+    private long lastPausedAt = 0L;
+    private static final long INACTIVITY_TIMEOUT_MS = 600_000L; // 10 minutes
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_admin_dashboard);
+
+        if (savedInstanceState != null) {
+            lastPausedAt = savedInstanceState.getLong("lastPausedAt", 0L);
+        }
 
         SharedPreferences prefs = SecurePrefs.get(this);
         String userRole = prefs.getString("role", "voter");
@@ -1819,5 +1826,30 @@ public class AdminDashboardActivity extends AppCompatActivity {
 
         Button posBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         if (posBtn != null) posBtn.setTextColor(Color.parseColor("#1E3A8A"));
+    }
+
+    @Override
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putLong("lastPausedAt", lastPausedAt);
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        lastPausedAt = System.currentTimeMillis();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (lastPausedAt > 0L && (System.currentTimeMillis() - lastPausedAt) > INACTIVITY_TIMEOUT_MS) {
+            SecurePrefs.clear(this);
+            Toast.makeText(this, "Admin session locked due to 10 minutes of inactivity", Toast.LENGTH_LONG).show();
+            Intent intent = new Intent(this, MainActivity.class);
+            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            startActivity(intent);
+            finish();
+        }
     }
 }
